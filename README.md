@@ -1,6 +1,7 @@
 # Unity Error Context Tool
 
-一个轻量的 Unity Editor 运行时错误上下文工具。在 Play Mode 中收集 C# 与 Lua 错误，并生成包含调用栈、源码位置和相关代码片段的分析上下文。
+一个轻量的 Unity Editor 收集运行时错误并构建上下文的工具。
+在 Play Mode 中收集 C# 与 Lua 错误，并生成包含调用栈、源码位置和相关代码片段的分析上下文。
 
 ## 功能概览
 
