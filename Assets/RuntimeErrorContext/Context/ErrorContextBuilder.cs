@@ -2,15 +2,20 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 
 namespace GameAle.EditorTools.RuntimeErrorContext
 {
     internal sealed class ErrorContextBuilder
     {
         private const int CurrentSchemaVersion = 1;
+        private readonly List<ISourceResolver> m_SourceResolvers;
 
-        public ErrorContext Build(RuntimeErrorRecord record)
+        public ErrorContextBuilder(IEnumerable<ISourceResolver> sourceResolvers = null)
+        {
+            m_SourceResolvers = sourceResolvers != null ? new List<ISourceResolver>(sourceResolvers) : null;
+        }
+
+        public ErrorContext Build(RuntimeErrorRecord record, int? sourceContextLineCount = null)
         {
             ParsedError parsedError = record != null ? record.Error : null;
             ErrorContext context = new ErrorContext
@@ -22,7 +27,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 Environment = new ErrorContextEnvironment
                 {
                     UnityVersion = Application.unityVersion,
-                    SceneName = SceneManager.GetActiveScene().name,
+                    SceneName = parsedError != null ? parsedError.SceneName ?? string.Empty : string.Empty,
                     Platform = Application.platform.ToString()
                 }
             };
@@ -34,38 +39,49 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             }
 
             // Resolver可能回写SourceFilePath，因此使用副本，避免修改Repository里的原始错误。
-            ErrorStackFrame frame = CloneStackFrame(parsedError.PrimaryFrame);
-            List<ISourceResolver> sourceResolvers = RuntimeErrorContextRegistry.GetSourceResolvers();
+            List<ISourceResolver> sourceResolvers = m_SourceResolvers ?? RuntimeErrorContextRegistry.GetSourceResolvers();
             for (int i = 0; i < sourceResolvers.Count; i++)
             {
                 ISourceResolver resolver = sourceResolvers[i];
-                if (!resolver.CanResolve(frame))
+                // 扩展可能修改栈帧后失败，每次尝试都使用干净的副本。
+                ErrorStackFrame frame = CloneStackFrame(parsedError.PrimaryFrame);
+                ResolvedSourceLocation location;
+                try
                 {
+                    if (!resolver.CanResolve(frame) || !resolver.TryResolve(frame, out location)
+                        || location == null)
+                    {
+                        continue;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    ExtensionDiagnostics.Report(resolver, "Resolve", exception);
                     continue;
                 }
 
-                ResolvedSourceLocation location;
-                if (resolver.TryResolve(frame, out location))
+                context.PrimaryLocation.SourceFilePath = location.ProjectRelativePath;
+                context.PrimaryLocation.AbsolutePath = location.AbsolutePath;
+                context.PrimaryLocation.LineNumber = location.LineNumber;
+                context.PrimaryLocation.IsResolved = true;
+                if (primaryStackIndex >= 0 && primaryStackIndex < context.StackFrames.Count)
                 {
-                    context.PrimaryLocation.SourceFilePath = location.ProjectRelativePath;
-                    context.PrimaryLocation.IsResolved = true;
-                    if (primaryStackIndex >= 0 && primaryStackIndex < context.StackFrames.Count)
-                    {
-                        context.StackFrames[primaryStackIndex].SourceFilePath = location.ProjectRelativePath;
-                    }
-
-                    SourceContext sourceContext = SourceContextReader.Read(location);
-                    if (sourceContext != null)
-                    {
-                        sourceContext.StackIndex = primaryStackIndex;
-                        sourceContext.IsPrimary = true;
-                        sourceContext.Language = frame.Language;
-                        sourceContext.FunctionName = frame.FunctionName ?? string.Empty;
-                        context.SourceContexts.Add(sourceContext);
-                    }
-
-                    break;
+                    context.StackFrames[primaryStackIndex].SourceFilePath = location.ProjectRelativePath;
+                    context.StackFrames[primaryStackIndex].LineNumber = location.LineNumber;
                 }
+
+                SourceContext sourceContext = SourceContextReader.Read(location,
+                    sourceContextLineCount ?? RuntimeErrorContextSettings.Current.SourceContextLineCount);
+                if (sourceContext != null)
+                {
+                    sourceContext.StackIndex = primaryStackIndex;
+                    sourceContext.IsPrimary = true;
+                    sourceContext.Language = frame.Language;
+                    sourceContext.FunctionName = frame.FunctionName ?? string.Empty;
+                    context.SourceContexts.Add(sourceContext);
+                }
+
+                break;
             }
 
             return context;

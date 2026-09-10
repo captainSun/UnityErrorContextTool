@@ -177,7 +177,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             settings.CollectByDefault = EditorGUILayout.Toggle("新会话默认开启", settings.CollectByDefault);
             settings.ClearOnEnterPlay = EditorGUILayout.Toggle("进入 Play 时清空", settings.ClearOnEnterPlay);
             settings.MaxRecordCount = EditorGUILayout.IntField("最大错误数量", settings.MaxRecordCount);
-            settings.SourceContextLineCount = EditorGUILayout.IntField("源码上下文行数", settings.SourceContextLineCount);
+            settings.SourceContextLineCount = EditorGUILayout.IntField("复制上下文行数", settings.SourceContextLineCount);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Lua 源码根目录（每行一个，可使用绝对路径）", EditorStyles.boldLabel);

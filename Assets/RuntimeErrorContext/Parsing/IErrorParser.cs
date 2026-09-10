@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace GameAle.EditorTools.RuntimeErrorContext
@@ -35,9 +36,20 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             for (int i = 0; i < m_Parsers.Count; i++)
             {
                 IErrorParser parser = m_Parsers[i];
-                if (parser.CanParse(rawEvent))
+                try
                 {
-                    return parser.Parse(rawEvent);
+                    if (parser.CanParse(rawEvent))
+                    {
+                        ParsedError result = parser.Parse(rawEvent);
+                        if (result != null)
+                        {
+                            return result;
+                        }
+                    }
+                }
+                catch (Exception exception)
+                {
+                    ExtensionDiagnostics.Report(parser, "Parse", exception);
                 }
             }
 

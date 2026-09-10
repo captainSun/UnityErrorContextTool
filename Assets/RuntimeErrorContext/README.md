@@ -20,7 +20,7 @@ Runtime Error Context 是一个轻量的 Unity Editor 运行时错误上下文�
 
 ## 环境要求
 
-- 推荐 Unity 2020.3或更高版本。
+- Unity 2022.3或更高版本。
 - 已在 Unity `2022.3.62f3` 验证。
 - 工具只在 Editor中编译，不会进入Player。
 - 不使用 Lua的项目仍可使用全部 C#错误能力。
@@ -74,6 +74,8 @@ Edit > Preferences > Runtime Error Context
 
 默认情况下，新Unity会话会开启收集，并在进入 Play Mode时清空上一轮记录。
 
+错误信息、调用栈和相关源码为只读文本，支持选择复制；切换错误记录时会清除旧文本焦点并刷新详情。相关源码优先显示在错误信息和调用栈之前，固定展示报错行及上下各5行（最多11行），以“>”标记报错行，不自动滚动。
+
 ## 错误分类
 
 工具使用两个独立维度描述错误。
@@ -109,11 +111,13 @@ Edit > Preferences > Runtime Error Context
 
 ### 最大错误数量
 
-控制最多保留多少种不同错误。相同错误只增加次数，不占用新的记录。
+控制最多保留多少种不同错误。相同错误增加次数并整体更新为最新一次的日志和解析结果，不占用新的记录；首次发生时间保持不变。超过容量时淘汰最后发生时间最早的记录。
 
-### 源码上下文行数
+采集队列独立限制为256条，每次 Editor update 最多解析50条；队列满后丢弃新日志，窗口状态栏显示丢弃数量。“清空”会同时清除待处理队列、聚合记录和丢弃计数。消息与调用栈分别最多保留16K和64K字符。
 
-控制主错误行前后读取的源码行数。默认值为15，即最多读取约31行。
+### 复制上下文行数
+
+控制复制分析上下文时主错误行前后读取的源码行数。默认值为15，即最多读取约31行；窗口中的相关源码固定为上下各5行，不受此设置影响。
 
 ### Lua源码根目录
 
@@ -224,7 +228,7 @@ ErrorContext
 - 解析后的源码上下文。
 - Unity版本、场景和平台。
 
-Context构建完成后不会随Repository中的原始记录变化。
+Context构建完成后不会随Repository中的原始记录变化。窗口收到选中记录的更新时会重建详情，复制时也会构建最新快照。场景名来自采集时缓存的活动场景；源码内容则来自构建快照时的磁盘文件，并非错误发生时的源码版本。
 
 ## 扩展Parser和Resolver
 
@@ -243,11 +247,13 @@ RuntimeErrorContextRegistry.RegisterSourceResolver(customResolver);
 - 公司内部Logger格式。
 - 项目外部共享源码目录。
 
-Parser、Resolver及其注册方法是公开API，可以从独立的Editor程序集注册扩展。自定义Resolver无法解析某个栈帧时应返回 `false`，Registry会继续尝试后续Resolver。
+Parser、Resolver及其注册方法是公开API，可以从独立的Editor程序集注册扩展。自定义Resolver无法解析某个栈帧时应返回 `false`，Builder会继续尝试后续Resolver。Parser返回 `null` 时会继续尝试低优先级Parser。解析或定位扩展抛出异常时会尝试后续实现，每种扩展故障在当前Domain内只警告一次；失败的Resolver对栈帧副本的修改不会影响后续Resolver。
 
 ## 源码跳转
 
-- `Assets`、`Packages` 下的 C#源码通过 `AssetDatabase.OpenAsset` 打开。
+- `Assets`、`Packages` 下的源码优先通过 `AssetDatabase.OpenAsset` 打开，失败时尝试默认外部编辑器。
+- `Packages` 下的 C#源码通过 Unity PackageManager 映射到实际安装目录，支持 PackageCache和本地包。
+- 源码按行读取至所需片段末尾；行号超过文件范围时不显示误导性的末行片段，仍允许打开已定位文件。
 - Assets外部的 Lua源码使用 Unity Preferences中配置的默认脚本编辑器。
 - 已支持 Rider、IntelliJ IDEA、VS Code、Cursor和 Visual Studio参数。
 - 工具不对 `Unity.CodeEditor` 产生编译期依赖。
@@ -286,6 +292,10 @@ Parser、Resolver及其注册方法是公开API，可以从独立的Editor程序
 - 不处理IL2CPP Native Crash和真机符号化。
 - 不采集局部变量、upvalue或GameObject状态。
 - 当前只读取主错误位置的一份源码上下文。
+- 错误记录保存在内存中，Domain Reload或重新打开Unity后不恢复历史记录。
+- 配置使用本机EditorPrefs，不通过版本控制共享。
+- 聚合指纹包含消息和主位置，不包含完整调用链；动态消息可能拆分记录，不同调用链可能合并为最新样本。
+- `ErrorContext`、Builder和Repository仍是内部API；公开扩展接口面向Parser和Resolver。
 - 特殊Lua虚拟路径可能需要自定义 `ISourceResolver`。
 - 工具不会自动调用AI，也不会自动修改业务代码。
 
@@ -296,3 +306,9 @@ Parser、Resolver及其注册方法是公开API，可以从独立的Editor程序
 - 不修改XLua、Logger和游戏业务。
 - 不上传日志或源码。
 - “复制分析上下文”只写入本机剪贴板。
+
+## 回归测试
+
+测试位于 `Tests/Editor`，依赖 Unity Test Framework（当前工程使用1.1.33）。通过 `Window > General > Test Runner > EditMode` 运行 `RuntimeErrorContext.Editor.Tests`。
+
+测试覆盖C#与Lua日志解析、递归和混合栈、聚合样本一致性、容量淘汰、并发队列、源码片段及越界行号、PackageCache/本地包映射、扩展故障回退、详情刷新和Markdown输出，并包含进入Play Mode后的主线程/后台线程采集、清空与关闭采集测试。集成测试会切换Play Mode，建议在独立验证工程运行。

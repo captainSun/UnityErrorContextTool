@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEngine;
+using UnityEditor.PackageManager;
 
 namespace GameAle.EditorTools.RuntimeErrorContext
 {
@@ -23,6 +24,29 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             {
                 string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
                 string normalizedPath = ErrorParsingUtility.NormalizePath(frame.RuntimeFilePath);
+                if (normalizedPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+                {
+                    PackageInfo package = PackageInfo.FindForAssetPath(normalizedPath);
+                    if (package != null)
+                    {
+                        string prefix = "Packages/" + package.name + "/";
+                        if (!normalizedPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+                        string packageRoot = Path.GetFullPath(package.resolvedPath)
+                            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                            + Path.DirectorySeparatorChar;
+                        string packagePath = Path.GetFullPath(Path.Combine(packageRoot, normalizedPath.Substring(prefix.Length)));
+                        if (!packagePath.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase)
+                            || !File.Exists(packagePath)) return false;
+                        location = new ResolvedSourceLocation
+                        {
+                            ProjectRelativePath = normalizedPath,
+                            AbsolutePath = packagePath,
+                            LineNumber = frame.LineNumber
+                        };
+                        frame.SourceFilePath = normalizedPath;
+                        return true;
+                    }
+                }
                 string absolutePath = Path.IsPathRooted(normalizedPath)
                     ? Path.GetFullPath(normalizedPath)
                     : Path.GetFullPath(Path.Combine(projectRoot, normalizedPath));
@@ -67,32 +91,40 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 return null;
             }
 
-            string[] lines;
+            int targetLine = Math.Max(1, location.LineNumber);
+            int safeContextLineCount = Math.Max(0, Math.Min(100, contextLineCount));
+            long endLine = (long)targetLine + safeContextLineCount;
+            int startLine = Math.Max(1, targetLine - safeContextLineCount);
+            List<string> lines = new List<string>();
             try
             {
-                lines = File.ReadAllLines(location.AbsolutePath, Encoding.UTF8);
+                using (StreamReader reader = new StreamReader(location.AbsolutePath, Encoding.UTF8, true))
+                {
+                    string line;
+                    for (long number = 1; number <= endLine && (line = reader.ReadLine()) != null; number++)
+                    {
+                        if (number >= startLine) lines.Add(line);
+                    }
+                }
             }
             catch (Exception)
             {
                 return null;
             }
 
-            if (lines.Length == 0)
+            // 越界行号通常说明源码已变化，不把文件末行伪装成错误位置。
+            if (lines.Count == 0 || (long)startLine + lines.Count - 1 < targetLine)
             {
                 return null;
             }
 
-            int targetIndex = Math.Max(0, Math.Min(lines.Length - 1, location.LineNumber - 1));
-            int safeContextLineCount = Math.Max(0, contextLineCount);
-            int start = Math.Max(0, targetIndex - safeContextLineCount);
-            int end = Math.Min(lines.Length - 1, targetIndex + safeContextLineCount);
-            int numberWidth = (end + 1).ToString().Length;
+            int numberWidth = ((long)startLine + lines.Count - 1).ToString().Length;
             StringBuilder builder = new StringBuilder();
 
-            for (int i = start; i <= end; i++)
+            for (int i = 0; i < lines.Count; i++)
             {
-                builder.Append(i == targetIndex ? "> " : "  ");
-                builder.Append((i + 1).ToString().PadLeft(numberWidth));
+                builder.Append(startLine + i == targetLine ? "> " : "  ");
+                builder.Append((startLine + i).ToString().PadLeft(numberWidth));
                 builder.Append(" | ");
                 builder.AppendLine(lines[i]);
             }

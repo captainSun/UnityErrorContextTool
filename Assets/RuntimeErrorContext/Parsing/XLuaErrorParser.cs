@@ -73,6 +73,11 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
             AddLuaFrames(result, message, luaStackTrace);
             AddCSharpFrames(result, rawEvent);
+            if (result.StackFrames.Exists(frame => frame.Language == ErrorLanguage.Lua)
+                && result.StackFrames.Exists(frame => frame.Language == ErrorLanguage.CSharp))
+            {
+                result.Language = ErrorLanguage.Mixed;
+            }
             result.PrimaryFrame = SelectPrimaryFrame(result);
 
             if (string.IsNullOrEmpty(result.LuaStackTrace))
@@ -128,20 +133,31 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
         private static void AddLuaFrames(ParsedError error, string message, string luaStackTrace)
         {
-            HashSet<string> addedFrames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Match headerMatch = LuaLocationRegex.Match(message);
-            if (headerMatch.Success)
-            {
-                AddLuaFrame(error, headerMatch, message, addedFrames);
-            }
-
             string[] lines = luaStackTrace.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 0; i < lines.Length; i++)
             {
                 Match frameMatch = LuaFrameRegex.Match(lines[i]);
                 if (frameMatch.Success)
                 {
-                    AddLuaFrame(error, frameMatch, lines[i], addedFrames);
+                    AddLuaFrame(error, frameMatch, lines[i]);
+                }
+            }
+
+            // 仅消除消息头与首帧的重复，保留 traceback 中的递归和重复调用。
+            if (headerMatch.Success)
+            {
+                int headerLine;
+                int.TryParse(headerMatch.Groups["line"].Value, out headerLine);
+                string headerPath = NormalizeLuaPath(headerMatch.Groups["path"].Value);
+                if (error.StackFrames.Count == 0
+                    || error.StackFrames[0].RuntimeFilePath != headerPath
+                    || error.StackFrames[0].LineNumber != headerLine)
+                {
+                    AddLuaFrame(error, headerMatch, message);
+                    ErrorStackFrame header = error.StackFrames[error.StackFrames.Count - 1];
+                    error.StackFrames.RemoveAt(error.StackFrames.Count - 1);
+                    error.StackFrames.Insert(0, header);
                 }
             }
         }
@@ -149,18 +165,11 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         private static void AddLuaFrame(
             ParsedError error,
             Match match,
-            string rawText,
-            HashSet<string> addedFrames)
+            string rawText)
         {
             string path = NormalizeLuaPath(match.Groups["path"].Value);
             int lineNumber;
             int.TryParse(match.Groups["line"].Value, out lineNumber);
-            string key = path + ":" + lineNumber;
-            if (!addedFrames.Add(key))
-            {
-                return;
-            }
-
             string description = match.Groups["description"].Value.Trim();
             Match functionMatch = FunctionRegex.Match(description);
             error.StackFrames.Add(new ErrorStackFrame

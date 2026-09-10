@@ -27,6 +27,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         public string Message;
         public string StackTrace;
         public DateTime Timestamp;
+        public string SceneName;
     }
 
     public sealed class ErrorStackFrame
@@ -55,6 +56,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         public string LuaStackTrace;
         public string CSharpStackTrace;
         public DateTime Timestamp;
+        public string SceneName;
     }
 
     internal sealed class RuntimeErrorRecord
@@ -106,6 +108,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
     internal sealed class ErrorContextLocation
     {
+        public string AbsolutePath;
         public ErrorLanguage Language;
         public string FunctionName;
         public string RuntimeFilePath;

@@ -200,7 +200,8 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 RawStackTrace = rawEvent.StackTrace ?? string.Empty,
                 LuaStackTrace = string.Empty,
                 CSharpStackTrace = rawEvent.StackTrace ?? string.Empty,
-                Timestamp = rawEvent.Timestamp
+                Timestamp = rawEvent.Timestamp,
+                SceneName = rawEvent.SceneName
             };
         }
 

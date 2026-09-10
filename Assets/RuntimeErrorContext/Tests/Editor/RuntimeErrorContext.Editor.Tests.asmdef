@@ -1,0 +1,7 @@
+{
+  "name": "RuntimeErrorContext.Editor.Tests",
+  "references": ["RuntimeErrorContext.Editor"],
+  "includePlatforms": ["Editor"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false
+}

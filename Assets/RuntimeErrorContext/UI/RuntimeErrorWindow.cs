@@ -8,6 +8,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
     internal sealed class RuntimeErrorWindow : EditorWindow
     {
         private const float ListWidth = 300f;
+        private const int SourcePreviewLineCount = 5;
         private const float ListItemHeight = 68f;
         private const float ListItemHorizontalIndent = 12f;
         private readonly ErrorContextBuilder m_ContextBuilder = new ErrorContextBuilder();
@@ -17,6 +18,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         private RuntimeErrorRecord m_SelectedRecord;
         private ErrorContext m_SelectedContext;
         private GUIStyle m_ListItemStyle;
+        private bool m_ResetDetailFocus;
 
         [MenuItem("Tools/Runtime Error Context")]
         private static void Open()
@@ -41,6 +43,14 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
         private void OnGUI()
         {
+            if (m_ResetDetailFocus)
+            {
+                // IMGUI会复用文本控件的编辑缓存，切换记录时释放旧文本焦点。
+                GUI.FocusControl(null);
+                EditorGUIUtility.editingTextField = false;
+                m_ResetDetailFocus = false;
+            }
+
             DrawToolbar();
             EditorGUILayout.Space(2f);
 
@@ -65,7 +75,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             GUILayout.Label("错误数: " + RuntimeErrorRepository.Count, EditorStyles.miniLabel);
             if (GUILayout.Button("清空", EditorStyles.toolbarButton, GUILayout.Width(48f)))
             {
-                RuntimeErrorRepository.Clear();
+                RuntimeErrorCollector.Clear();
                 ClearSelection();
             }
 
@@ -83,7 +93,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             {
                 EditorGUILayout.HelpBox(RuntimeErrorCollector.IsCollecting
                     ? "尚未收集到运行时错误。"
-                    : "采集默认关闭，请手动开启。", MessageType.Info);
+                    : "采集已关闭，请手动开启。", MessageType.Info);
             }
 
             for (int i = 0; i < records.Count; i++)
@@ -119,6 +129,8 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 if (clicked)
                 {
                     SelectRecord(record);
+                    // 不同记录的详情控件数量可能不同，下一轮Layout再绘制新详情。
+                    GUIUtility.ExitGUI();
                 }
 
                 GUILayout.Space(4f);
@@ -149,40 +161,40 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             EditorGUILayout.LabelField("位置", GetLocationText(m_SelectedContext.PrimaryLocation));
             EditorGUILayout.Space();
 
+            if (m_SelectedContext.SourceContexts.Count > 0)
+            {
+                EditorGUILayout.LabelField("相关源码", EditorStyles.boldLabel);
+                DrawReadOnlyText("RuntimeErrorContext.Source", m_SelectedContext.SourceContexts[0].Content, 180f);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("未定位到可读取的项目源码。", MessageType.None);
+            }
+            EditorGUILayout.Space();
+
             EditorGUILayout.LabelField("错误信息", EditorStyles.boldLabel);
-            EditorGUILayout.TextArea(error.Message, GUILayout.MinHeight(70f));
+            DrawReadOnlyText("RuntimeErrorContext.Message", error.Message, 70f);
             EditorGUILayout.Space();
 
             if (!string.IsNullOrEmpty(error.LuaStackTrace))
             {
                 EditorGUILayout.LabelField("Lua 调用栈", EditorStyles.boldLabel);
-                EditorGUILayout.TextArea(error.LuaStackTrace, GUILayout.MinHeight(130f));
+                DrawReadOnlyText("RuntimeErrorContext.LuaStack", error.LuaStackTrace, 130f);
                 EditorGUILayout.Space();
             }
 
             if (!string.IsNullOrEmpty(error.CSharpStackTrace))
             {
-                EditorGUILayout.LabelField(error.Language == ErrorLanguage.Lua ? "C# 外层调用栈" : "C# 调用栈",
+                EditorGUILayout.LabelField(error.Language == ErrorLanguage.Lua || error.Language == ErrorLanguage.Mixed ? "C# 外层调用栈" : "C# 调用栈",
                     EditorStyles.boldLabel);
-                EditorGUILayout.TextArea(error.CSharpStackTrace, GUILayout.MinHeight(130f));
+                DrawReadOnlyText("RuntimeErrorContext.CSharpStack", error.CSharpStackTrace, 130f);
             }
 
-            if (m_SelectedContext != null && m_SelectedContext.SourceContexts.Count > 0)
-            {
-                EditorGUILayout.Space();
-                EditorGUILayout.LabelField("相关源码", EditorStyles.boldLabel);
-                EditorGUILayout.TextArea(m_SelectedContext.SourceContexts[0].Content, GUILayout.MinHeight(180f));
-            }
-            else
-            {
-                EditorGUILayout.Space();
-                EditorGUILayout.HelpBox("未定位到可读取的项目源码。", MessageType.None);
-            }
 
             EditorGUILayout.EndScrollView();
 
             EditorGUILayout.BeginHorizontal();
-            EditorGUI.BeginDisabledGroup(m_SelectedContext == null || m_SelectedContext.SourceContexts.Count == 0);
+            EditorGUI.BeginDisabledGroup(m_SelectedContext == null || !m_SelectedContext.PrimaryLocation.IsResolved);
             if (GUILayout.Button("打开源码", GUILayout.Height(26f)))
             {
                 OpenSelectedSource();
@@ -200,27 +212,44 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             EditorGUILayout.EndVertical();
         }
 
+        private static void DrawReadOnlyText(string controlName, string content, float minHeight)
+        {
+            string text = content ?? string.Empty;
+            Rect rect = GUILayoutUtility.GetRect(new GUIContent(text), EditorStyles.textArea,
+                GUILayout.MinHeight(minHeight), GUILayout.ExpandWidth(true));
+            GUI.SetNextControlName(controlName);
+            // 详情是快照，只允许选择复制；按内容计算高度，避免长源码被裁切。
+            EditorGUI.SelectableLabel(rect, text, EditorStyles.textArea);
+        }
+
         private void SelectRecord(RuntimeErrorRecord record)
         {
             m_SelectedRecord = record;
-            m_SelectedContext = m_ContextBuilder.Build(record);
+            m_SelectedContext = m_ContextBuilder.Build(record, SourcePreviewLineCount);
             m_DetailScroll = Vector2.zero;
+            EditorGUIUtility.editingTextField = false;
+            m_ResetDetailFocus = true;
+            Repaint();
         }
 
         private void OpenSelectedSource()
         {
-            SourceContext source = m_SelectedContext.SourceContexts[0];
+            ErrorContextLocation location = m_SelectedContext.PrimaryLocation;
             bool opened;
-            if (source.Location.ProjectRelativePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
-                || source.Location.ProjectRelativePath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            if (location.SourceFilePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                || location.SourceFilePath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
             {
-                UnityEngine.Object asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(source.Location.ProjectRelativePath);
-                opened = asset != null && AssetDatabase.OpenAsset(asset, source.Location.LineNumber);
+                UnityEngine.Object asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(location.SourceFilePath);
+                opened = asset != null && AssetDatabase.OpenAsset(asset, location.LineNumber);
+                if (!opened)
+                {
+                    opened = OpenExternalSourceWithDefaultEditor(location.AbsolutePath, location.LineNumber);
+                }
             }
             else
             {
                 opened = OpenExternalSourceWithDefaultEditor(
-                    source.Location.AbsolutePath, source.Location.LineNumber);
+                    location.AbsolutePath, location.LineNumber);
             }
 
             if (!opened)
@@ -238,6 +267,12 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 {
                     ClearSelection();
                 }
+                else if (m_SelectedContext == null
+                         || m_SelectedContext.Aggregation.OccurrenceCount != m_SelectedRecord.OccurrenceCount
+                         || m_SelectedContext.Aggregation.LastOccurredAt != m_SelectedRecord.LastOccurredAt)
+                {
+                    m_SelectedContext = m_ContextBuilder.Build(m_SelectedRecord, SourcePreviewLineCount);
+                }
             }
 
             Repaint();
@@ -247,6 +282,8 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         {
             m_SelectedRecord = null;
             m_SelectedContext = null;
+            EditorGUIUtility.editingTextField = false;
+            m_ResetDetailFocus = true;
         }
 
         private static string GetStatusText()
@@ -256,7 +293,12 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 return "状态：未收集";
             }
 
-            return EditorApplication.isPlaying ? "状态：正在收集" : "状态：已开启，等待 Play";
+            string status = EditorApplication.isPlaying ? "状态：正在收集" : "状态：已开启，等待 Play";
+            if (RuntimeErrorCollector.DroppedEventCount > 0)
+            {
+                status += "；队列已满，丢弃 " + RuntimeErrorCollector.DroppedEventCount + " 条";
+            }
+            return status;
         }
 
         private static string GetLocationText(ErrorContextLocation location)

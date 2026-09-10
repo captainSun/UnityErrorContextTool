@@ -26,8 +26,8 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             {
                 record.LastOccurredAt = error.Timestamp;
                 record.OccurrenceCount++;
-                record.Error.RawMessage = error.RawMessage;
-                record.Error.RawStackTrace = error.RawStackTrace;
+                // 聚合计数保留，但样本整体替换，保证原始日志和解析栈属于同一次事件。
+                record.Error = error;
             }
             else
             {
