@@ -2,13 +2,7 @@
 
 Unity Editor 错误上下文工具：收集日志、解析 C# / Lua 栈、定位源码、聚合记录，并通过窗口、剪贴板或本地 Markdown 文件提供分析上下文。
 
-## 安装与入口
-
-支持 Unity 2022.3+，验证版本为 2022.3.62f3。由 Editor-only asmdef 隔离，无需放入 Editor 文件夹，不依赖 XLua 程序集。
-
-- **Assets 安装**：复制整个 RuntimeErrorContext 目录到目标工程 Assets 下，保留 `.meta`。
-- **UPM 安装**：将目录作为嵌入包放入 `Packages/com.sunshuo.runtime-error-context`，或通过 Package Manager 的 Add package from disk 选择本目录的 `package.json`。
-- 不要在同一工程同时安装两份。
+## 功能入口
 
 窗口：**Tools > Runtime Error Context**。
 设置：**Tools > Runtime Error Context Settings**，或 **Edit > Preferences > Runtime Error Context**。
@@ -163,4 +157,4 @@ Parser 返回 null 或扩展抛出异常时尝试后续实现。Resolver 使用�
 
 通过 **Window > General > Test Runner > EditMode** 运行 `RuntimeErrorContext.Editor.Tests`。依赖 Unity Test Framework，当前验证使用 1.1.33。集成测试会切换 Play Mode，推荐在独立工程运行。
 
-最近完整回归：Unity 2022.3.62f3，**62 项全部通过**。覆盖解析、递归和混合栈、聚合、队列、源码解析、扩展回退、Markdown、项目接入、文件同步、搜索及选中项滚动补偿。Assets 和 UPM 嵌入包方式均做过接入验证。实际界面观感和外部 IDE 跳转需在使用环境验证。
+最近完整回归：Unity 2022.3.62f3，**62 项全部通过**。覆盖解析、递归和混合栈、聚合、队列、源码解析、扩展回退、Markdown、项目接入、文件同步、搜索及选中项滚动补偿。实际界面观感和外部 IDE 跳转需在使用环境验证。

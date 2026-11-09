@@ -19,21 +19,7 @@
 
 工具仅在 Editor 中编译，不进入 Player；不依赖 XLua 程序集、AI SDK 或 MCP，不自动上传日志、启动 AI 分析或修改业务代码。
 
-## 环境与安装
-
-要求 Unity **2022.3 或更高版本**，当前使用 **2022.3.62f3** 验证。
-
-### 复制到 Assets
-
-将本仓库的 `Assets/RuntimeErrorContext` 整个目录复制到目标项目的 `Assets` 下，保留 `.meta` 文件。
-
-### UPM 包
-
-包入口为 `Assets/RuntimeErrorContext/package.json`。可将该目录复制到目标项目的 `Packages/com.sunshuo.runtime-error-context`，作为嵌入包使用；也可以通过 Package Manager 的 **Add package from disk** 选择该文件。
-
-同一项目选择一种安装方式，避免重复程序集。无论插件安装在哪里，配置和错误快照都写入**当前使用插件的 Unity 项目**。
-
-## 快速开始
+## 排错流程
 
 1. 打开 **Tools > Runtime Error Context**。
 2. 确认“收集运行时错误”开启，进入 Play Mode 并复现问题。
@@ -73,8 +59,8 @@ Lua 项目需要在 **Tools > Runtime Error Context Settings** 中设置源码�
 
 ## 文档与验证
 
-详见 [安装、设置、扩展接口及常见问题](Assets/RuntimeErrorContext/README.md)。
+详见 [功能说明、设置、扩展接口及常见问题](Assets/RuntimeErrorContext/README.md)。
 
 测试程序集为 `RuntimeErrorContext.Editor.Tests`，通过 Unity Test Runner 的 EditMode 执行。最近一次完整回归为 **62 项全部通过**，包含搜索、选中项滚动补偿、Lua 前缀路径解析、Agent 配置与同步。集成测试会切换 Play Mode，建议使用独立验证工程。
 
-Assets 和 UPM 嵌入包接入已做自动化验证；实际 IDE 跳转及界面交互仍需在使用环境中验证。
+实际 IDE 跳转及界面交互仍需在使用环境中验证。
