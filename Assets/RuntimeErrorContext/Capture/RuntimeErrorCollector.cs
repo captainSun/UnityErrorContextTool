@@ -53,6 +53,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         {
             ClearPendingEvents();
             RuntimeErrorRepository.Clear();
+            AgentContextSync.Clear();
             RaiseStateChanged();
         }
 

@@ -1,0 +1,17 @@
+{
+  "name": "com.sunshuo.runtime-error-context",
+  "version": "0.1.0",
+  "displayName": "Runtime Error Context",
+  "description": "Collects Unity C# and Lua runtime errors and builds structured ErrorContext snapshots.",
+  "unity": "2022.3",
+  "keywords": [
+    "error",
+    "debug",
+    "lua",
+    "stacktrace",
+    "editor"
+  ],
+  "author": {
+    "name": "sunshuo"
+  }
+}

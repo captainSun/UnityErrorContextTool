@@ -385,6 +385,363 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             StringAssert.Contains("line 5", markdown);
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void CopyContextAddsTwoDistinctCallersAndSkipsUnavailableSources(bool missingPrimary)
+        {
+            File.WriteAllLines(m_SourceFile, Enumerable.Range(1, 40).Select(i => "line " + i));
+            string callerFile = m_SourceFile + ".cs";
+            File.WriteAllLines(callerFile, Enumerable.Range(1, 40).Select(i => "caller " + i));
+            try
+            {
+                var primary = new ErrorStackFrame { Language = ErrorLanguage.Lua, RuntimeFilePath = missingPrimary ? m_SourceFile + ".missing" : m_SourceFile, LineNumber = 10, IsProjectCode = true };
+                var error = new ParsedError { PrimaryFrame = primary, Language = ErrorLanguage.Mixed };
+                error.StackFrames.Add(primary);
+                error.StackFrames.Add(new ErrorStackFrame { RuntimeFilePath = primary.RuntimeFilePath, LineNumber = 10, IsProjectCode = true });
+                error.StackFrames.Add(new ErrorStackFrame { RuntimeFilePath = callerFile, LineNumber = 8, IsProjectCode = false });
+                error.StackFrames.Add(new ErrorStackFrame { RuntimeFilePath = callerFile + ".missing", LineNumber = 8, IsProjectCode = true });
+                error.StackFrames.Add(new ErrorStackFrame { RuntimeFilePath = callerFile, LineNumber = 99, IsProjectCode = true });
+                error.StackFrames.Add(new ErrorStackFrame { Language = ErrorLanguage.CSharp, RuntimeFilePath = callerFile, LineNumber = 15, IsProjectCode = true, FunctionName = "Caller.Run" });
+                error.StackFrames.Add(new ErrorStackFrame { Language = ErrorLanguage.CSharp, RuntimeFilePath = callerFile, LineNumber = 15, IsProjectCode = true });
+                error.StackFrames.Add(new ErrorStackFrame { Language = ErrorLanguage.Lua, RuntimeFilePath = m_SourceFile, LineNumber = 25, IsProjectCode = true });
+                error.StackFrames.Add(new ErrorStackFrame { RuntimeFilePath = callerFile, LineNumber = 30, IsProjectCode = true });
+                var record = new RuntimeErrorRecord { Error = error };
+                var builder = new ErrorContextBuilder(new[] { new DirectFileResolver() });
+                Assert.AreEqual(missingPrimary ? 0 : 1, builder.Build(record, 5).SourceContexts.Count);
+                var context = builder.Build(record, 15, includeCallers: true);
+                var callers = context.SourceContexts.Where(source => !source.IsPrimary).ToList();
+                Assert.AreEqual(2, callers.Count);
+                CollectionAssert.AreEqual(new[] { 5, 7 }, callers.Select(source => source.StackIndex));
+                Assert.AreEqual(11, callers[0].Content.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries).Length);
+                StringAssert.Contains("10 | caller 10", callers[0].Content);
+                StringAssert.Contains("20 | caller 20", callers[0].Content);
+                Assert.AreEqual(9, context.StackFrames.Count);
+                Assert.IsTrue(error.StackFrames.All(frame => frame.SourceFilePath == null));
+                string markdown = ErrorContextFormatter.ToMarkdown(context);
+                StringAssert.Contains("## Caller Source", markdown);
+                StringAssert.Contains("Function: Caller.Run", markdown);
+                StringAssert.Contains("Line: 25", markdown);
+            }
+            finally { File.Delete(callerFile); }
+        }
+
+        [Test]
+        public void AgentSyncFollowsSelectionUpdatesAndClearWithoutRecreatingOldFile()
+        {
+            RuntimeErrorContextSettings.Current.LuaSourceRoots = new List<string> { Path.GetDirectoryName(m_SourceFile) };
+            WithAgentSyncPath(m_SourceFile + ".md", () =>
+            {
+                var window = ScriptableObject.CreateInstance<RuntimeErrorWindow>();
+                try
+                {
+                    var select = typeof(RuntimeErrorWindow).GetMethod("SelectRecord", BindingFlags.NonPublic | BindingFlags.Instance);
+                    var raw = Log(m_SourceFile.Replace('\\', '/') + ":5: attempt to index nil\nstack traceback:\n "
+                        + m_SourceFile.Replace('\\', '/') + ":8: in function 'caller'");
+                    raw.StackTrace = string.Empty;
+                    var record = RuntimeErrorRepository.AddOrUpdate(new XLuaErrorParser().Parse(raw), true);
+                    select.Invoke(window, new object[] { record });
+                    Assert.IsFalse(File.Exists(AgentContextSync.OutputPath));
+                    AgentContextSync.SetEnabled(true, record);
+                    string initial = File.ReadAllText(AgentContextSync.OutputPath);
+                    StringAssert.Contains("Generated at UTC:", initial);
+                    StringAssert.Contains(record.Fingerprint, initial);
+                    StringAssert.Contains("## Caller Source", initial);
+                    Assert.IsFalse(File.Exists(AgentContextSync.OutputPath + ".tmp"));
+
+                    RuntimeErrorRepository.AddOrUpdate(new XLuaErrorParser().Parse(raw), true);
+                    Assert.AreEqual(initial, File.ReadAllText(AgentContextSync.OutputPath), "重复日志应合并写入");
+                    AgentContextSync.Flush();
+                    StringAssert.Contains("Occurrences: 2", File.ReadAllText(AgentContextSync.OutputPath));
+
+                    var other = RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log("second selected error")), true);
+                    select.Invoke(window, new object[] { other });
+                    StringAssert.Contains("second selected error", File.ReadAllText(AgentContextSync.OutputPath));
+                    UnityEngine.Object.DestroyImmediate(window);
+                    window = null;
+                    RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log("second selected error")), true);
+                    AgentContextSync.Flush();
+                    StringAssert.Contains("Occurrences: 2", File.ReadAllText(AgentContextSync.OutputPath));
+
+                    RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log("second selected error")), true);
+                    RuntimeErrorCollector.Clear();
+                    AgentContextSync.Flush();
+                    Assert.IsFalse(File.Exists(AgentContextSync.OutputPath));
+                    Assert.IsTrue(AgentContextSync.IsEnabled);
+                    File.WriteAllText(AgentContextSync.OutputPath, "stale");
+                    RuntimeErrorCollector.Clear();
+                    Assert.IsFalse(File.Exists(AgentContextSync.OutputPath), "空仓库清空也应移除旧文件");
+                }
+                finally { if (window != null) UnityEngine.Object.DestroyImmediate(window); }
+            });
+        }
+
+        [Test]
+        public void AgentSyncRemovesFileOnEvictionAndStop()
+        {
+            WithAgentSyncPath(m_SourceFile + ".md", () =>
+            {
+                RuntimeErrorContextSettings.Current.MaxRecordCount = 1;
+                var record = RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log()), true);
+                AgentContextSync.SetEnabled(true, record);
+                Assert.IsTrue(File.Exists(AgentContextSync.OutputPath));
+                var other = RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log("other")), true);
+                Assert.IsFalse(File.Exists(AgentContextSync.OutputPath));
+                AgentContextSync.Select(other);
+                Assert.IsTrue(File.Exists(AgentContextSync.OutputPath));
+                AgentContextSync.SetEnabled(false, other);
+                AgentContextSync.Select(other);
+                AgentContextSync.Flush();
+                Assert.IsFalse(File.Exists(AgentContextSync.OutputPath));
+            });
+        }
+
+        [Test]
+        public void AgentSyncReportsWriteFailureWithoutThrowingOrLogging()
+        {
+            // 父路径是已有文件，创建目录必定失败。
+            WithAgentSyncPath(Path.Combine(m_SourceFile, "current.md"), () =>
+            {
+                var record = RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log()), true);
+                Assert.DoesNotThrow(() => AgentContextSync.SetEnabled(true, record));
+                StringAssert.Contains("同步给 Agent 失败", AgentContextSync.LastError);
+                Assert.IsFalse(File.Exists(AgentContextSync.OutputPath));
+                LogAssert.NoUnexpectedReceived();
+            });
+        }
+
+        private static void WithAgentSyncPath(string path, Action action)
+        {
+            string previousPath = AgentContextSync.OutputPath;
+            bool previousEnabled = AgentContextSync.IsEnabled;
+            AgentContextSync.OutputPath = path;
+            AgentContextSync.SetEnabled(false, null);
+            try { action(); }
+            finally
+            {
+                AgentContextSync.SetEnabled(previousEnabled, null);
+                AgentContextSync.OutputPath = previousPath;
+            }
+        }
+
+        [Test]
+        public void AgentSetupCreatesFilesAndIsIdempotent()
+        {
+            WithSetupDirectory(root =>
+            {
+                Assert.IsFalse(AgentProjectSetup.IsConfigured(root));
+                Assert.IsTrue(AgentProjectSetup.Configure(root, out var message), message);
+                Assert.IsTrue(AgentProjectSetup.IsConfigured(root));
+                string agents = File.ReadAllText(Path.Combine(root, "AGENTS.md"));
+                string ignore = File.ReadAllText(Path.Combine(root, ".gitignore"));
+                Assert.IsTrue(AgentProjectSetup.Configure(root, out message), message);
+                Assert.AreEqual(agents, File.ReadAllText(Path.Combine(root, "AGENTS.md")));
+                Assert.AreEqual(ignore, File.ReadAllText(Path.Combine(root, ".gitignore")));
+                Assert.IsFalse(File.Exists(Path.Combine(root, ".error-context/current.md")));
+            });
+        }
+
+        [Test]
+        public void AgentSetupUpdatesOnlyManagedBlockAndPreservesEncoding()
+        {
+            WithSetupDirectory(root =>
+            {
+                string path = Path.Combine(root, "AGENTS.md");
+                File.WriteAllText(path, "项目规则\r\n" + AgentProjectSetup.StartMarker + "\r\n旧规则\r\n"
+                    + AgentProjectSetup.EndMarker + "\r\n保留尾部", new System.Text.UnicodeEncoding(false, true));
+                File.WriteAllText(Path.Combine(root, ".gitignore"), "# existing\r\nLibrary/\r\n");
+                Assert.IsTrue(AgentProjectSetup.Configure(root, out var message), message);
+                string text = File.ReadAllText(path);
+                StringAssert.StartsWith("项目规则\r\n" + AgentProjectSetup.StartMarker, text);
+                StringAssert.EndsWith(AgentProjectSetup.EndMarker + "\r\n保留尾部", text);
+                StringAssert.DoesNotContain("旧规则", text);
+                Assert.AreEqual(255, File.ReadAllBytes(path)[0]);
+                StringAssert.StartsWith("# existing\r\nLibrary/\r\n", File.ReadAllText(Path.Combine(root, ".gitignore")));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AgentSetupRejectsMalformedMarkersWithoutChangingFiles(bool duplicate)
+        {
+            WithSetupDirectory(root =>
+            {
+                string original = AgentProjectSetup.StartMarker + (duplicate
+                    ? AgentProjectSetup.StartMarker + AgentProjectSetup.EndMarker : "unfinished");
+                File.WriteAllText(Path.Combine(root, "AGENTS.md"), original);
+                Assert.IsFalse(AgentProjectSetup.Configure(root, out var message));
+                StringAssert.Contains("标记", message);
+                Assert.AreEqual(original, File.ReadAllText(Path.Combine(root, "AGENTS.md")));
+                Assert.IsFalse(File.Exists(Path.Combine(root, ".gitignore")));
+            });
+        }
+
+        [Test]
+        public void AgentSetupReadOnlyIgnoreDoesNotModifyAgents()
+        {
+            WithSetupDirectory(root =>
+            {
+                string ignore = Path.Combine(root, ".gitignore");
+                File.WriteAllText(ignore, "original");
+                File.SetAttributes(ignore, FileAttributes.ReadOnly);
+                try
+                {
+                    Assert.IsFalse(AgentProjectSetup.Configure(root, out _));
+                    Assert.IsFalse(File.Exists(Path.Combine(root, "AGENTS.md")));
+                    Assert.AreEqual("original", File.ReadAllText(ignore));
+                }
+                finally { File.SetAttributes(ignore, FileAttributes.Normal); }
+            });
+        }
+
+        private void WithSetupDirectory(Action<string> action)
+        {
+            string root = m_SourceFile + ".setup";
+            Directory.CreateDirectory(root);
+            try { action(root); }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestCase(LogType.Error, "错误")]
+        [TestCase(LogType.Exception, "异常")]
+        [TestCase(LogType.Assert, "断言失败")]
+        public void ClassificationUsesPrimaryLocationAndRawLogTypeInsteadOfHeuristics(LogType type, string expected)
+        {
+            var raw = Log("LuaException: model/Test.lua:5: attempt to index nil");
+            raw.LogType = type;
+            var error = new XLuaErrorParser().Parse(raw);
+            Assert.AreEqual(ErrorLanguage.Mixed, error.Language);
+            var record = RuntimeErrorRepository.AddOrUpdate(error, false);
+            var labelMethod = typeof(RuntimeErrorWindow).GetMethod("BuildListLabel", BindingFlags.Static | BindingFlags.NonPublic);
+            foreach (ErrorKind kind in Enum.GetValues(typeof(ErrorKind)))
+            {
+                error.Kind = kind;
+                string label = (string)labelMethod.Invoke(null, new object[] { record, "model/Test.lua:5" });
+                StringAssert.Contains("[Lua]", label);
+                StringAssert.Contains("[" + expected + "]", label);
+                StringAssert.DoesNotContain("混合", label);
+                Assert.AreEqual("[Lua] [" + expected + "]",
+                    RuntimeErrorWindow.GetClassificationLabel(RuntimeErrorWindow.GetPrimaryLanguage(error.PrimaryFrame), error.LogType));
+            }
+            error.PrimaryFrame = null;
+            StringAssert.Contains("[未定位]", (string)labelMethod.Invoke(null, new object[] { record, "未解析" }));
+        }
+
+        [TestCase("XOneRedPointCom 红点强制刷新 捕获报错: ")]
+        [TestCase("业务错误：")]
+        public void LuaBusinessPrefixDoesNotBecomeSourcePath(string prefix)
+        {
+            RuntimeErrorContextSettings.Current.LuaSourceRoots = new List<string> { Path.GetDirectoryName(m_SourceFile) };
+            string path = Path.GetFileName(m_SourceFile);
+            var raw = Log(prefix + path + ":5: attempt to index a nil value (field '?')\nstack traceback:\n utils/XLogger.lua:93: in field 'SetTraceBack'\n caller.lua:8: in function 'refresh'");
+            var error = new XLuaErrorParser().Parse(raw);
+            Assert.AreEqual(path, error.PrimaryFrame.RuntimeFilePath);
+            Assert.AreEqual(5, error.PrimaryFrame.LineNumber);
+            Assert.AreEqual(raw.Message, error.RawMessage);
+            StringAssert.Contains(prefix, error.Message);
+            var context = new ErrorContextBuilder().Build(RuntimeErrorRepository.AddOrUpdate(error, false));
+            Assert.IsTrue(context.PrimaryLocation.IsResolved);
+            Assert.AreEqual(1, context.SourceContexts.Count);
+        }
+
+        [TestCase("D:/Game Project/Lua/model/User.lua", "D:/Game Project/Lua/model/User.lua")]
+        [TestCase("捕获报错: D:/Game Project/Lua/model/User.lua", "D:/Game Project/Lua/model/User.lua")]
+        [TestCase("捕获报错: [string \"@model/User.lua\"]", "model/User.lua")]
+        [TestCase("目录 有空格/User.lua", "目录 有空格/User.lua")]
+        public void LuaHeaderPrefixPreservesDrivesAndSpaces(string header, string expected)
+        {
+            var error = new XLuaErrorParser().Parse(Log(header + ":5: attempt to index nil"));
+            Assert.AreEqual(expected, error.PrimaryFrame.RuntimeFilePath);
+        }
+
+        [TestCase("  INVALIDoperation  ", true)]
+        [TestCase("assets\\caller.cs", true)]
+        [TestCase("Game.First", true)]
+        [TestCase("Game.Fail", true)]
+        [TestCase("不存在的消息", false)]
+        [TestCase("  ", true)]
+        public void SearchMatchesMessageAndCallerWithoutCaseOrSlashRestrictions(string query, bool expected)
+        {
+            var record = RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log()), false);
+            Assert.AreEqual(expected, RuntimeErrorWindow.MatchesSearch(record, query));
+            record.Error.RawMessage = "原始中文报错";
+            Assert.IsTrue(RuntimeErrorWindow.MatchesSearch(record, "中文报错"));
+            record.Error.StackFrames = null;
+            Assert.IsFalse(RuntimeErrorWindow.MatchesSearch(record, "not found"));
+        }
+
+        [Test]
+        public void SearchDoesNotChangeSelectionOrAgentSnapshotAndUsesLatestSample()
+        {
+            WithAgentSyncPath(m_SourceFile + ".search.md", () =>
+            {
+                var window = ScriptableObject.CreateInstance<RuntimeErrorWindow>();
+                try
+                {
+                    var record = RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log()), false);
+                    var type = typeof(RuntimeErrorWindow);
+                    type.GetMethod("SelectRecord", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(window, new object[] { record });
+                    AgentContextSync.SetEnabled(true, record);
+                    string snapshot = File.ReadAllText(AgentContextSync.OutputPath);
+                    type.GetMethod("SetSearchQuery", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(window, new object[] { "does not match" });
+                    Assert.AreSame(record, type.GetField("m_SelectedRecord", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(window));
+                    Assert.AreEqual(snapshot, File.ReadAllText(AgentContextSync.OutputPath));
+                    Assert.AreEqual(1, RuntimeErrorRepository.Count);
+                    RuntimeErrorRepository.AddOrUpdate(new CSharpErrorParser().Parse(Log(caller: "Second")), true);
+                    Assert.IsFalse(RuntimeErrorWindow.MatchesSearch(record, "Game.First"));
+                    Assert.IsTrue(RuntimeErrorWindow.MatchesSearch(record, "Game.Second"));
+                    type.GetMethod("SetSearchQuery", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(window, new object[] { "" });
+                    Assert.IsTrue(RuntimeErrorWindow.MatchesSearch(record, ""));
+                }
+                finally { UnityEngine.Object.DestroyImmediate(window); }
+            });
+        }
+
+        [TestCase(4, 2, 260f, 116f)]
+        [TestCase(2, 5, 120f, 336f)]
+        [TestCase(2, 0, 120f, 0f)]
+        [TestCase(2, 7, 120f, 376f)]
+        [TestCase(0, 4, 200f, 200f)]
+        [TestCase(7, 0, 0f, 0f)]
+        public void ListReorderKeepsVisibleSelectionAtSameOffsetWithoutPullingOffscreenSelection(int oldIndex, int newIndex, float scroll, float expected)
+        {
+            var window = ScriptableObject.CreateInstance<RuntimeErrorWindow>();
+            try
+            {
+                var records = Enumerable.Range(0, 8).Select(i => new RuntimeErrorRecord()).ToList();
+                var selected = records[oldIndex];
+                var type = typeof(RuntimeErrorWindow);
+                const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+                type.GetField("m_SelectedRecord", flags).SetValue(window, selected);
+                type.GetField("m_ListViewportHeight", flags).SetValue(window, 200f);
+                type.GetField("m_ListScroll", flags).SetValue(window, new Vector2(0, scroll));
+                var preserve = type.GetMethod("PreserveSelectedListPosition", flags);
+                preserve.Invoke(window, new object[] { new List<RuntimeErrorRecord>(records) });
+                records.Remove(selected);
+                records.Insert(newIndex, selected);
+                preserve.Invoke(window, new object[] { records });
+                Assert.AreEqual(expected, ((Vector2)type.GetField("m_ListScroll", flags).GetValue(window)).y);
+                // 后续 Layout/Repaint 不得重复补偿。
+                preserve.Invoke(window, new object[] { new List<RuntimeErrorRecord>(records) });
+                Assert.AreEqual(expected, ((Vector2)type.GetField("m_ListScroll", flags).GetValue(window)).y);
+                Assert.AreSame(selected, type.GetField("m_SelectedRecord", flags).GetValue(window));
+                type.GetMethod("SetSearchQuery", flags).Invoke(window, new object[] { "new search" });
+                records.Reverse();
+                preserve.Invoke(window, new object[] { records });
+                Assert.AreEqual(0f, ((Vector2)type.GetField("m_ListScroll", flags).GetValue(window)).y);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(window); }
+        }
+
+        private sealed class DirectFileResolver : ISourceResolver
+        {
+            public bool CanResolve(ErrorStackFrame frame) => true;
+            public bool TryResolve(ErrorStackFrame frame, out ResolvedSourceLocation location)
+            {
+                location = new ResolvedSourceLocation { AbsolutePath = frame.RuntimeFilePath, ProjectRelativePath = frame.RuntimeFilePath, LineNumber = frame.LineNumber };
+                return File.Exists(frame.RuntimeFilePath);
+            }
+        }
+
         private sealed class ThrowingParser : IErrorParser
         {
             public int Priority => 500;

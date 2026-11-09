@@ -1,314 +1,166 @@
-# Runtime Error Context
+# Runtime Error Context 使用指南
 
-Runtime Error Context 是一个轻量的 Unity Editor 运行时错误上下文工具。它在 Play Mode 中收集 C# 与 Lua 错误，将原始日志转换为可定位、可聚合、可复制给 Agent 分析的 `ErrorContext`。
+Unity Editor 错误上下文工具：收集日志、解析 C# / Lua 栈、定位源码、聚合记录，并通过窗口、剪贴板或本地 Markdown 文件提供分析上下文。
 
-工具本身不依赖 AI、MCP、XLua程序集或游戏业务代码。AI只是 `ErrorContext` 的消费者，不参与日志捕获、栈解析和源码定位。
+## 安装与入口
 
-## 功能
+支持 Unity 2022.3+，验证版本为 2022.3.62f3。由 Editor-only asmdef 隔离，无需放入 Editor 文件夹，不依赖 XLua 程序集。
 
-- 收集 `Exception`、`Error` 和 `Assert`。
-- 区分 C#、Lua和未知错误。
-- 区分运行时异常、捕获后打印、主动错误和断言。
-- 解析 C# StackTrace和常见 Lua `stack traceback`。
-- 识别主错误文件、函数和行号。
-- 定位 `Assets/`、`Packages/` 下的 C# 与 Lua源码，并读取错误行附近代码。
-- 聚合相同错误并显示发生次数。
-- 分开展示 Lua调用栈和 C#外层调用栈。
-- 使用 Unity配置的默认IDE打开源码。
-- 复制稳定的 Markdown分析上下文。
-- 通过 Settings配置不同项目的 Lua路径和日志约定。
+- **Assets 安装**：复制整个 RuntimeErrorContext 目录到目标工程 Assets 下，保留 `.meta`。
+- **UPM 安装**：将目录作为嵌入包放入 `Packages/com.sunshuo.runtime-error-context`，或通过 Package Manager 的 Add package from disk 选择本目录的 `package.json`。
+- 不要在同一工程同时安装两份。
 
-## 环境要求
+窗口：**Tools > Runtime Error Context**。
+设置：**Tools > Runtime Error Context Settings**，或 **Edit > Preferences > Runtime Error Context**。
 
-- Unity 2022.3或更高版本。
-- 已在 Unity `2022.3.62f3` 验证。
-- 工具只在 Editor中编译，不会进入Player。
-- 不使用 Lua的项目仍可使用全部 C#错误能力。
+## 日常排错
 
-## 安装
+1. 开启“收集运行时错误”，进入 Play Mode。
+2. 复现错误，在左侧列表选择记录。
+3. 查看消息、主位置源码及 Lua / C# 调用栈。
+4. 点击“打开源码”“复制分析上下文”，或开启“同步给 Agent”。
 
-将完整的 `RuntimeErrorContext` 目录复制到目标项目的 `Assets` 下：
+默认新 Unity 会话开启采集，进入 Play Mode 前清空上一轮记录。采集范围是 Exception、Error 和 Assert，不包含普通 Log / Warning。
 
-```text
-Assets/
-└── RuntimeErrorContext/
-    ├── RuntimeErrorContext.Editor.asmdef
-    ├── Capture/
-    ├── Context/
-    ├── Core/
-    ├── Parsing/
-    ├── Source/
-    └── UI/
-```
+### 搜索与选中项
 
-复制时应保留目录内的 `.meta` 文件。`RuntimeErrorContext.Editor.asmdef` 会确保工具只进入Editor程序集，因此目录不要求放在 `Assets/Editor` 下。
+搜索框按完整消息、错误类型、主位置及其他栈帧的文件路径和函数名匹配。大小写不敏感，路径支持正反斜杠，忽略搜索词首尾空白。清除搜索恢复全部列表。
 
-等待 Unity完成编译后，可以从以下菜单打开工具：
+搜索不删除记录、不改变选中项或同步目标。选中项被隐藏时会提示，详情仍可查看。
 
-```text
-Tools > Runtime Error Context
-```
+列表按最近发生时间排序。重复报错或新日志引起重排时，若选中项原本可见，会补偿滚动位置，尽量保留其屏幕位置；到列表首尾时受滚动范围限制。手动滚离、搜索隐藏或记录淘汰不会触发强行拉回。修改搜索词从列表顶部显示结果。
 
-设置入口：
+### 详情与标签
 
-```text
-Tools > Runtime Error Context Settings
-```
+错误消息显示在源码之前。选中卡片使用蓝色背景及边框；消息、源码和栈文本支持只读选择复制。
 
-也可以从以下位置打开：
+标签分为两个维度：
 
-```text
-Edit > Preferences > Runtime Error Context
-```
+| 维度 | 标签 | 含义 |
+| --- | --- | --- |
+| 报错位置 | Lua / C# / 未定位 | 按主错误位置的语言、路径和行号判断，不保证本地文件可读取或已确认根因 |
+| Unity 日志类型 | 异常 / 错误 / 断言失败 | 分别对应 Exception / Error / Assert，不判断是否被捕获，也不是严重程度评级 |
 
-## 快速使用
+混合栈在详情中注明“包含 Lua 和 C#”。内部 ErrorKind 保留兼容性及原有聚合用途，不作为新的来源推断标签。
 
-1. 打开 `Tools > Runtime Error Context`。
-2. 确认顶部“收集运行时错误”已经开启。
-3. 进入 Play Mode。
-4. 复现错误。
-5. 从左侧错误列表选择一条记录。
-6. 查看错误消息、Lua/C#调用栈和相关源码。
-7. 点击“打开源码”跳转到默认IDE。
-8. 点击“复制分析上下文”，将结果发送给 Codex、ChatGPT、Claude或其他Agent。
+## 源码上下文与复制
 
-默认情况下，新Unity会话会开启收集，并在进入 Play Mode时清空上一轮记录。
+- 窗口只预览主位置上下各 **5 行**，最多 11 行，用 `>` 标出目标行。
+- 复制和同步时，主位置默认上下各 **15 行**，可在设置中调整。
+- 额外收集最多 **两个业务调用位置**，各上下 5 行。
+- 跳过非业务帧、配置的 Logger 和重复文件行号；无法定位或读取时继续查找后续帧。完整解析栈不因片段去重而删除递归层次。
 
-错误信息、调用栈和相关源码为只读文本，支持选择复制；切换错误记录时会清除旧文本焦点并刷新详情。相关源码优先显示在错误信息和调用栈之前，固定展示报错行及上下各5行（最多11行），以“>”标记报错行，不自动滚动。
+复制内容包括错误消息、日志类型、聚合次数与时间、主位置、相关源码、Lua / C# 栈、Unity 版本、场景和平台。
 
-## 错误分类
+源码来自构建上下文时的磁盘文件，场景来自采集时缓存。Context 是独立快照，不会随 Repository 原始对象变化；详情更新或复制时重新构建。
 
-工具使用两个独立维度描述错误。
+## Agent 接入与同步
 
-### 语言
+### 首次配置
 
-- `C#`
-- `Lua`
-- `Mixed`
-- `Unknown`
+点击“配置 Agent 接入”，无需先产生错误。工具在**当前 Unity 项目根目录**：
 
-### 错误性质
+- 创建或补充 `AGENTS.md`，只更新 `runtime-error-context:start/end` 标记内的读取约定，保留其他内容。
+- 创建或补充 `.gitignore`，添加 `/.error-context/`，避免重复添加。
+- 检查写入权限，标记损坏或只读文件时显示原因。
 
-- `RuntimeException`：未捕获或明确的运行时异常。
-- `CaughtExceptionLog`：异常被业务捕获后通过Logger打印。
-- `ManualErrorLog`：业务主动调用错误日志。
-- `Assert`：断言错误。
-- `Unknown`：无法可靠分类。
+配置阶段不创建空的错误快照。已经手工编写、但不在插件标记内的规则会保留。移植到其他项目后，需要在目标项目再次配置。
 
-分类采用日志与调用栈特征，不修改游戏业务，也不注入Lua虚拟机。
+### 同步指定错误
 
-## Settings说明
+选中记录后点击“同步给 Agent”，输出至 `.error-context/current.md`。未完成接入配置时，可以选择“配置并同步”或“仅同步”。
 
-所有设置按项目保存在本机 `EditorPrefs`，不会生成项目资产，也不会提交到版本控制。
+文件包含一条选中错误的完整分析上下文、UTC 生成时间和错误指纹：
 
-### 新会话默认开启
+- 切换选择立即更新文件，其他记录不会抢占目标。
+- 重复报错合并更新，最多每 0.5 秒写入一次。
+- 关闭窗口后继续跟踪已选择记录。
+- 同步开关在当前 Unity 会话保留。
+- 清空、停止同步、选中记录被淘汰或 Domain Reload 时删除快照；清空或 Reload 后需再次选择错误才能继续同步。
+- 写入采用同目录临时文件替换，失败提示不产生可被自身采集的错误日志。
 
-控制重新打开 Unity后是否默认开启错误收集。当前Unity会话仍可通过窗口顶部开关随时修改。
+配置成功后顶部收成一行状态，显示位置、更新时间及“查看上下文文件”（在文件管理器中显示）。展开“设置”可查看完整路径、使用说明和更新配置入口。
 
-### 进入 Play时清空
+在有权限访问该工程的 Agent 中说“分析当前 Unity 错误”。Agent 按 AGENTS.md 读取文件，并继续检查项目源码。同步文件不会自动启动分析，也不调用模型或上传内容。
 
-开启后，每次进入 Play Mode前清除上一轮错误记录。
+## 设置说明
 
-### 最大错误数量
+设置按项目存储于本机 EditorPrefs，不生成项目资产。采集开关使用 SessionState。
 
-控制最多保留多少种不同错误。相同错误增加次数并整体更新为最新一次的日志和解析结果，不占用新的记录；首次发生时间保持不变。超过容量时淘汰最后发生时间最早的记录。
+| 设置 | 用途 |
+| --- | --- |
+| 新会话默认开启 | 重新打开 Unity 时是否默认采集 |
+| 进入 Play 时清空 | 开始新一轮运行前清除记录和同步快照 |
+| 最大错误数量 | 最多保留的不同指纹记录数；超出时淘汰最近发生时间最早的一条 |
+| 复制上下文行数 | 主位置导出范围，默认上下各 15 行；不改变窗口预览范围 |
+| Lua 源码根目录 | 按顺序映射 Lua 日志路径，支持项目相对路径和绝对路径 |
+| Lua Logger 前缀 | 识别特殊 Lua 日志格式及内部错误性质，不等于确认主动报错来源 |
+| 忽略的 Lua 栈帧 | 排除 Logger 包装层，优先选择业务位置 |
+| 忽略的 C# 路径 | 降低第三方目录作为主位置的优先级 |
+| C# Logger 方法标记 | 内部异常日志识别及额外源码片段的 Logger 过滤 |
 
-采集队列独立限制为256条，每次 Editor update 最多解析50条；队列满后丢弃新日志，窗口状态栏显示丢弃数量。“清空”会同时清除待处理队列、聚合记录和丢弃计数。消息与调用栈分别最多保留16K和64K字符。
+Lua 路径示例：日志 `model/UserModel.lua:1671`，实际文件 `SourceRes/Lua/model/UserModel.lua`，根目录填写 `SourceRes/Lua`。不要填写到 `model` 子目录。
 
-### 复制上下文行数
+常见根目录还有 `Assets/Lua`、`Assets/LuaScripts`、`Assets/Scripts/Lua`。忽略帧可填写 `utils/XLogger.lua` 等路径后缀。
 
-控制复制分析上下文时主错误行前后读取的源码行数。默认值为15，即最多读取约31行；窗口中的相关源码固定为上下各5行，不受此设置影响。
+修改解析规则后，已有记录不会自动重新解析，建议清空并重新复现。修改 Lua 根目录后的当前详情自动刷新尚未实现；可重新选择记录以重建源码上下文。
 
-### Lua源码根目录
+## 常见问题
 
-每行填写一个目录。支持项目相对路径和绝对路径，工具会按顺序查找第一个存在的源码文件。
+### 根目录已配置，仍然没有源码
 
-常见配置：
+分别检查解析位置、根目录映射、文件是否存在、行号是否有效。界面会区分“已配置但路径未匹配”和“文件已定位但对应行不可读取”；设置入口不表示配置丢失。
 
-```text
-SourceRes/Lua
-Assets/Lua
-Assets/LuaScripts
-Assets/Scripts/Lua
-```
+支持从“业务说明：model/User.lua:行号”消息头中提取路径，保留原始消息，兼容盘符、带空格路径和常见 `[string "@..."]` 格式。升级解析逻辑后须重新采集旧记录。
 
-例如日志位置为：
+### pcall 捕获后，traceback 与报错位置不同
 
-```text
-model/UserModel.lua:1668
-```
+错误消息可能保留原始文件行号，但在 pcall 返回后由 Logger 生成的 traceback 可能只反映打印时的调用栈。工具不能恢复已丢失的异常栈；补充的源码片段来自日志记录的调用位置，不保证是异常发生前的直接调用者。
 
-Lua根目录为：
+### Lua 异常为什么显示“错误”
+
+如果日志经 LogError 输出，其 Unity 原始类型就是 Error。标签不推断主动打印、捕获状态或严重程度。
+
+### 主位置落在 Logger 或第三方代码
+
+配置忽略的 Lua 栈帧或 C# 路径。仅依据已有日志定位，不保证选出的主位置就是根因。
+
+### 无法跳转 IDE
+
+先确认 Unity Preferences 的 External Script Editor 配置。Assets / Packages 文件优先使用 AssetDatabase.OpenAsset，失败时尝试默认编辑器；外部 Lua 文件直接使用默认编辑器。已实现 Rider、IDEA、VS Code、Cursor、Visual Studio 的参数支持，实际启动与行号跳转需在本机验证。
+
+### Agent 找不到上下文
+
+确认 Agent 打开的是发生错误的游戏工程，并在该工程选择记录、开启同步。清空、停止同步或 Domain Reload 后文件会被删除，需重新选择。搜索隐藏选中项不会停止其同步。
+
+## 架构与扩展
 
 ```text
-Assets/Game/Lua
+Capture → Parsing → Repository → Context + Source → UI / Markdown / 本地同步
 ```
 
-则工具会查找：
+日志线程仅轻量入队，解析、Unity API 和界面更新在主线程执行。队列上限 256 条，每次 Editor update 最多处理 50 条；消息和栈分别最多保留 16K / 64K 字符。队列满时丢弃新日志并显示计数，清空同时处理队列、记录和丢弃计数。
 
-```text
-Assets/Game/Lua/model/UserModel.lua
-```
-
-### Lua Logger前缀
-
-用于识别 Lua主动错误打印。例如：
-
-```text
-LUAXLogger:
-LUA:
-[LuaError]
-```
-
-如果主动错误被误判为运行时异常，应将项目实际使用的Logger前缀添加到这里。
-
-### 忽略的 Lua栈帧
-
-用于跳过Logger包装层，选择真正的业务调用位置。例如：
-
-```text
-utils/XLogger.lua
-Logger.lua
-framework/LogUtil.lua
-```
-
-### 忽略的 C#路径
-
-这些目录下的栈帧不会优先作为业务错误位置。例如：
-
-```text
-Assets/3rd/
-Assets/Plugins/
-Assets/ThirdParty/
-Assets/Generated/
-```
-
-### C# Logger方法标记
-
-用于识别“异常被捕获后主动打印”。填写Logger在调用栈中出现的方法名，例如：
-
-```text
-XLogger:LogError
-GameLogger:Error
-LogService:LogException
-```
-
-修改解析规则后，建议清空已有错误并重新复现，因为已经收集的记录不会自动重新解析。
-
-## ErrorContext流程
-
-```text
-Unity Log
-    ↓
-RuntimeErrorCollector
-    ↓
-ErrorParserRegistry
-    ↓
-ParsedError / ErrorStackFrame
-    ↓
-RuntimeErrorRepository
-    ↓
-SourceResolverRegistry
-    ↓
-ErrorContextBuilder
-    ↓
-ErrorContext
-    ├── EditorWindow
-    ├── Markdown Formatter
-    └── Future Agent / AI Consumer
-```
-
-`ErrorContext` 是独立快照，包含：
-
-- 错误语言、性质、类型和消息。
-- 原始消息和原始调用栈。
-- 聚合指纹、发生次数和时间。
-- 主错误位置。
-- 结构化StackFrame列表。
-- 解析后的源码上下文。
-- Unity版本、场景和平台。
-
-Context构建完成后不会随Repository中的原始记录变化。窗口收到选中记录的更新时会重建详情，复制时也会构建最新快照。场景名来自采集时缓存的活动场景；源码内容则来自构建快照时的磁盘文件，并非错误发生时的源码版本。
-
-## 扩展Parser和Resolver
-
-工具通过Registry管理Parser和SourceResolver：
+公开扩展接口：
 
 ```csharp
 RuntimeErrorContextRegistry.RegisterParser(customParser);
 RuntimeErrorContextRegistry.RegisterSourceResolver(customResolver);
 ```
 
-适合扩展：
+实现 `IErrorParser` 或 `ISourceResolver`，可从独立 Editor 程序集注册。适用于特殊 Lua 格式、外部源码路径、加密或打包脚本的自定义映射。
 
-- 其他Lua框架或特殊日志格式。
-- 加密Lua和 `.bytes` 文件。
-- AssetBundle中的Lua Source Manifest。
-- 公司内部Logger格式。
-- 项目外部共享源码目录。
+Parser 返回 null 或扩展抛出异常时尝试后续实现。Resolver 使用栈帧副本，失败修改不影响 Repository；扩展故障每种在当前 Domain 内最多警告一次。包源码通过 PackageManager 实际安装目录定位。ErrorContext、Builder、Repository 仍为内部 API。
 
-Parser、Resolver及其注册方法是公开API，可以从独立的Editor程序集注册扩展。自定义Resolver无法解析某个栈帧时应返回 `false`，Builder会继续尝试后续Resolver。Parser返回 `null` 时会继续尝试低优先级Parser。解析或定位扩展抛出异常时会尝试后续实现，每种扩展故障在当前Domain内只警告一次；失败的Resolver对栈帧副本的修改不会影响后续Resolver。
+## 边界与测试
 
-## 源码跳转
+- 仅收集 Editor Play Mode 日志，不进入 Player，不处理真机日志和 IL2CPP Native Crash。
+- 不采集局部变量、upvalue、GameObject 或业务状态，不自动修改业务源码。
+- 不上传日志、不调用 AI、不提供 JSON 导出。
+- 记录仅存在内存中，Domain Reload 和重新启动不恢复历史。
+- 指纹包含消息与主位置而非完整调用链；动态消息可能拆成多条，不同调用链可能合并为最新样本。
+- 路径范围检查保留，越界行号不会展示伪造的末行片段。
 
-- `Assets`、`Packages` 下的源码优先通过 `AssetDatabase.OpenAsset` 打开，失败时尝试默认外部编辑器。
-- `Packages` 下的 C#源码通过 Unity PackageManager 映射到实际安装目录，支持 PackageCache和本地包。
-- 源码按行读取至所需片段末尾；行号超过文件范围时不显示误导性的末行片段，仍允许打开已定位文件。
-- Assets外部的 Lua源码使用 Unity Preferences中配置的默认脚本编辑器。
-- 已支持 Rider、IntelliJ IDEA、VS Code、Cursor和 Visual Studio参数。
-- 工具不对 `Unity.CodeEditor` 产生编译期依赖。
+通过 **Window > General > Test Runner > EditMode** 运行 `RuntimeErrorContext.Editor.Tests`。依赖 Unity Test Framework，当前验证使用 1.1.33。集成测试会切换 Play Mode，推荐在独立工程运行。
 
-如果无法打开Lua源码，请先确认：
-
-1. Unity Preferences中已经配置 External Script Editor。
-2. Lua源码根目录配置正确。
-3. 日志中的相对路径能够映射到本地源码。
-
-## 常见问题
-
-### Lua错误可以收集，但没有源码
-
-检查 `Lua源码根目录`，确保配置的是包含 `model/`、`uisystem/` 等目录的上一级目录。
-
-### Lua主动错误显示为运行时异常
-
-将实际日志前缀加入 `Lua Logger前缀`。
-
-### 主位置落在 Logger.lua
-
-将Logger文件加入 `忽略的 Lua栈帧`。
-
-### C#错误定位到第三方目录
-
-将目录加入 `忽略的 C#路径`。
-
-### 修改Settings后旧记录没有变化
-
-已有错误不会重新解析。请清空列表并重新复现错误。
-
-## 当前限制
-
-- 只收集 Editor Play Mode日志。
-- 不处理IL2CPP Native Crash和真机符号化。
-- 不采集局部变量、upvalue或GameObject状态。
-- 当前只读取主错误位置的一份源码上下文。
-- 错误记录保存在内存中，Domain Reload或重新打开Unity后不恢复历史记录。
-- 配置使用本机EditorPrefs，不通过版本控制共享。
-- 聚合指纹包含消息和主位置，不包含完整调用链；动态消息可能拆分记录，不同调用链可能合并为最新样本。
-- `ErrorContext`、Builder和Repository仍是内部API；公开扩展接口面向Parser和Resolver。
-- 特殊Lua虚拟路径可能需要自定义 `ISourceResolver`。
-- 工具不会自动调用AI，也不会自动修改业务代码。
-
-## 安全边界
-
-- 工具代码只在Editor中编译。
-- 默认关闭Player运行时依赖。
-- 不修改XLua、Logger和游戏业务。
-- 不上传日志或源码。
-- “复制分析上下文”只写入本机剪贴板。
-
-## 回归测试
-
-测试位于 `Tests/Editor`，依赖 Unity Test Framework（当前工程使用1.1.33）。通过 `Window > General > Test Runner > EditMode` 运行 `RuntimeErrorContext.Editor.Tests`。
-
-测试覆盖C#与Lua日志解析、递归和混合栈、聚合样本一致性、容量淘汰、并发队列、源码片段及越界行号、PackageCache/本地包映射、扩展故障回退、详情刷新和Markdown输出，并包含进入Play Mode后的主线程/后台线程采集、清空与关闭采集测试。集成测试会切换Play Mode，建议在独立验证工程运行。
+最近完整回归：Unity 2022.3.62f3，**62 项全部通过**。覆盖解析、递归和混合栈、聚合、队列、源码解析、扩展回退、Markdown、项目接入、文件同步、搜索及选中项滚动补偿。Assets 和 UPM 嵌入包方式均做过接入验证。实际界面观感和外部 IDE 跳转需在使用环境验证。

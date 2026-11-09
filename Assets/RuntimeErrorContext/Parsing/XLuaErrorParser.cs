@@ -149,12 +149,12 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             {
                 int headerLine;
                 int.TryParse(headerMatch.Groups["line"].Value, out headerLine);
-                string headerPath = NormalizeLuaPath(headerMatch.Groups["path"].Value);
+                string headerPath = NormalizeHeaderPath(headerMatch.Groups["path"].Value);
                 if (error.StackFrames.Count == 0
                     || error.StackFrames[0].RuntimeFilePath != headerPath
                     || error.StackFrames[0].LineNumber != headerLine)
                 {
-                    AddLuaFrame(error, headerMatch, message);
+                    AddLuaFrame(error, headerMatch, message, headerPath);
                     ErrorStackFrame header = error.StackFrames[error.StackFrames.Count - 1];
                     error.StackFrames.RemoveAt(error.StackFrames.Count - 1);
                     error.StackFrames.Insert(0, header);
@@ -165,9 +165,9 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         private static void AddLuaFrame(
             ParsedError error,
             Match match,
-            string rawText)
+            string rawText, string headerPath = null)
         {
-            string path = NormalizeLuaPath(match.Groups["path"].Value);
+            string path = headerPath ?? NormalizeLuaPath(match.Groups["path"].Value);
             int lineNumber;
             int.TryParse(match.Groups["line"].Value, out lineNumber);
             string description = match.Groups["description"].Value.Trim();
@@ -233,6 +233,23 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             }
 
             return builder.ToString().TrimEnd();
+        }
+
+        private static string NormalizeHeaderPath(string path)
+        {
+            // 业务日志常在位置前加“捕获报错：”。只处理消息头，保留 traceback 原始层次。
+            string value = path.Trim();
+            for (int i = value.Length - 1; i >= 0; i--)
+            {
+                if (value[i] != ':' && value[i] != '：') continue;
+                bool drive = value[i] == ':' && i > 0 && char.IsLetter(value[i - 1])
+                    && i + 1 < value.Length && (value[i + 1] == '/' || value[i + 1] == '\\')
+                    && (i == 1 || value[i - 2] == '@' || char.IsWhiteSpace(value[i - 2]) || value[i - 2] == '"');
+                if (!drive) { value = value.Substring(i + 1).Trim(); break; }
+            }
+            if (value.StartsWith("[string ", StringComparison.Ordinal))
+                value = value.Substring(8).TrimStart('"', '\'');
+            return NormalizeLuaPath(value);
         }
 
         private static string NormalizeLuaPath(string path)

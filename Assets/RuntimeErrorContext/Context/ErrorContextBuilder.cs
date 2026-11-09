@@ -15,7 +15,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             m_SourceResolvers = sourceResolvers != null ? new List<ISourceResolver>(sourceResolvers) : null;
         }
 
-        public ErrorContext Build(RuntimeErrorRecord record, int? sourceContextLineCount = null)
+        public ErrorContext Build(RuntimeErrorRecord record, int? sourceContextLineCount = null, bool includeCallers = false)
         {
             ParsedError parsedError = record != null ? record.Error : null;
             ErrorContext context = new ErrorContext
@@ -84,7 +84,72 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 break;
             }
 
+            if (includeCallers && parsedError.StackFrames != null)
+            {
+                AddCallerSources(context, parsedError, sourceResolvers);
+            }
+
             return context;
+        }
+
+        private static void AddCallerSources(ErrorContext context, ParsedError error, List<ISourceResolver> resolvers)
+        {
+            int added = 0;
+            for (int index = 0; index < error.StackFrames.Count && added < 2; index++)
+            {
+                ErrorStackFrame original = error.StackFrames[index];
+                if (original == null || !original.IsProjectCode || ReferenceEquals(original, error.PrimaryFrame)
+                    || original.LineNumber <= 0 || IsConfiguredLogger(original))
+                    continue;
+
+                foreach (ISourceResolver resolver in resolvers)
+                {
+                    ErrorStackFrame frame = CloneStackFrame(original);
+                    ResolvedSourceLocation location;
+                    try
+                    {
+                        if (!resolver.CanResolve(frame) || !resolver.TryResolve(frame, out location) || location == null)
+                            continue;
+                    }
+                    catch (Exception exception)
+                    {
+                        ExtensionDiagnostics.Report(resolver, "Resolve", exception);
+                        continue;
+                    }
+
+                    bool duplicate = context.SourceContexts.Exists(source =>
+                        source.Location.LineNumber == location.LineNumber &&
+                        string.Equals(source.Location.AbsolutePath, location.AbsolutePath,
+                            Application.platform == RuntimePlatform.WindowsEditor
+                                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal));
+                    if (duplicate || location.LineNumber <= 0) break;
+
+                    SourceContext sourceContext = SourceContextReader.Read(location, 5);
+                    if (sourceContext != null)
+                    {
+                        sourceContext.StackIndex = index;
+                        sourceContext.Language = original.Language;
+                        sourceContext.FunctionName = original.FunctionName ?? string.Empty;
+                        context.SourceContexts.Add(sourceContext);
+                        context.StackFrames[index].SourceFilePath = location.ProjectRelativePath;
+                        context.StackFrames[index].LineNumber = location.LineNumber;
+                        added++;
+                    }
+                    break;
+                }
+            }
+        }
+
+        private static bool IsConfiguredLogger(ErrorStackFrame frame)
+        {
+            if (frame.Language != ErrorLanguage.CSharp) return false;
+            string function = (frame.FunctionName ?? string.Empty).Replace(':', '.');
+            foreach (string marker in RuntimeErrorContextSettings.Current.CSharpLoggerMethods)
+            {
+                if (!string.IsNullOrEmpty(marker) && function.IndexOf(marker.Replace(':', '.'), StringComparison.Ordinal) >= 0)
+                    return true;
+            }
+            return false;
         }
 
         private static ErrorContextInfo CreateErrorInfo(ParsedError error)
@@ -277,9 +342,11 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             {
                 SourceContext source = context.SourceContexts[i];
                 builder.AppendLine();
-                builder.AppendLine("## Relevant Source");
+                builder.AppendLine(source.IsPrimary ? "## Relevant Source" : "## Caller Source");
                 builder.AppendLine();
                 builder.Append("File: ").AppendLine(source.Location.ProjectRelativePath);
+                builder.Append("Line: ").AppendLine(source.Location.LineNumber.ToString());
+                builder.Append("Function: ").AppendLine(source.FunctionName);
                 builder.AppendLine();
                 string codeLanguage = source.Location.ProjectRelativePath.EndsWith(".lua") ? "lua" : "csharp";
                 builder.Append("```").AppendLine(codeLanguage);

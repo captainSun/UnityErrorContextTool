@@ -19,6 +19,14 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         private ErrorContext m_SelectedContext;
         private GUIStyle m_ListItemStyle;
         private bool m_ResetDetailFocus;
+        private bool m_AgentConfigured;
+        private string m_SetupMessage;
+        private bool m_ShowAgentSettings;
+        private string m_SearchQuery = string.Empty;
+        private UnityEditor.IMGUI.Controls.SearchField m_SearchField;
+        private List<RuntimeErrorRecord> m_PreviousVisibleRecords;
+        private float m_ListViewportHeight;
+        private const float ListItemSpacing = 4f;
 
         [MenuItem("Tools/Runtime Error Context")]
         private static void Open()
@@ -31,14 +39,17 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
         private void OnEnable()
         {
+            RefreshAgentSetup();
             RuntimeErrorRepository.Changed += OnRepositoryChanged;
             RuntimeErrorCollector.StateChanged += Repaint;
+            AgentContextSync.Changed += Repaint;
         }
 
         private void OnDisable()
         {
             RuntimeErrorRepository.Changed -= OnRepositoryChanged;
             RuntimeErrorCollector.StateChanged -= Repaint;
+            AgentContextSync.Changed -= Repaint;
         }
 
         private void OnGUI()
@@ -52,6 +63,9 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             }
 
             DrawToolbar();
+            DrawAgentSetup();
+            if (!string.IsNullOrEmpty(AgentContextSync.LastError))
+                EditorGUILayout.HelpBox(AgentContextSync.LastError, MessageType.Warning);
             EditorGUILayout.Space(2f);
 
             EditorGUILayout.BeginHorizontal();
@@ -70,6 +84,10 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             }
 
             GUILayout.Space(8f);
+            EditorGUI.BeginDisabledGroup(!AgentContextSync.IsEnabled && m_SelectedRecord == null);
+            if (GUILayout.Button(AgentContextSync.IsEnabled ? "停止同步给 Agent" : "同步给 Agent", EditorStyles.toolbarButton))
+                ToggleAgentSync();
+            EditorGUI.EndDisabledGroup();
             GUILayout.Label(GetStatusText(), EditorStyles.miniLabel);
             GUILayout.FlexibleSpace();
             GUILayout.Label("错误数: " + RuntimeErrorRepository.Count, EditorStyles.miniLabel);
@@ -82,16 +100,104 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             EditorGUILayout.EndHorizontal();
         }
 
+        private void OnFocus() { RefreshAgentSetup(); }
+
+        private void RefreshAgentSetup()
+        {
+            m_AgentConfigured = AgentProjectSetup.IsConfigured(AgentProjectSetup.ProjectRoot);
+        }
+
+        private bool ConfigureAgent()
+        {
+            bool success = AgentProjectSetup.Configure(AgentProjectSetup.ProjectRoot, out m_SetupMessage);
+            RefreshAgentSetup();
+            m_ShowAgentSettings = !success;
+            if (success) m_SetupMessage = null;
+            return success;
+        }
+
+        private void ToggleAgentSync()
+        {
+            if (AgentContextSync.IsEnabled)
+            {
+                AgentContextSync.SetEnabled(false, null);
+                return;
+            }
+            RefreshAgentSetup();
+            if (!m_AgentConfigured)
+            {
+                int choice = EditorUtility.DisplayDialogComplex("配置 Agent 接入",
+                    "是否同时配置当前项目的 Agent 读取约定？将更新 AGENTS.md 和 .gitignore，保留已有内容。",
+                    "配置并同步", "取消", "仅同步");
+                if (choice == 1 || (choice == 0 && !ConfigureAgent())) return;
+            }
+            AgentContextSync.SetEnabled(true, m_SelectedRecord);
+        }
+
+        private void DrawAgentSetup()
+        {
+            bool hasSnapshot = AgentContextSync.LastWrittenAt != default(DateTime)
+                && string.IsNullOrEmpty(AgentContextSync.LastError) && System.IO.File.Exists(AgentContextSync.OutputPath);
+            string status = m_AgentConfigured ? "Agent：已就绪" : "Agent：尚未配置";
+            if (!string.IsNullOrEmpty(AgentContextSync.LastError)) status = "Agent：同步失败";
+            else if (hasSnapshot)
+                status = "已同步：" + AgentContextSync.LastLocation + " · " + AgentContextSync.LastWrittenAt.ToString("HH:mm:ss");
+            else if (AgentContextSync.IsEnabled) status = "Agent：请选择错误以继续同步";
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Label(new GUIContent(status, status), EditorStyles.miniLabel, GUILayout.MinWidth(0f), GUILayout.ExpandWidth(true));
+            if (hasSnapshot && GUILayout.Button("查看上下文文件", GUILayout.Width(110f)))
+                EditorUtility.RevealInFinder(AgentContextSync.OutputPath);
+            if (GUILayout.Button(m_ShowAgentSettings ? "设置 ▴" : "设置 ▾", GUILayout.Width(64f)))
+            {
+                m_ShowAgentSettings = !m_ShowAgentSettings;
+                GUIUtility.ExitGUI();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            // 未配置时保留首次接入引导；日常使用只占一行。
+            if (!m_AgentConfigured || m_ShowAgentSettings)
+            {
+                EditorGUILayout.LabelField("在当前项目的 Agent 中说“分析当前 Unity 错误”。", EditorStyles.wordWrappedMiniLabel);
+                EditorGUILayout.SelectableLabel(AgentContextSync.OutputPath, EditorStyles.miniLabel, GUILayout.Height(18f));
+                if (!string.IsNullOrEmpty(m_SetupMessage))
+                    EditorGUILayout.LabelField(m_SetupMessage, EditorStyles.wordWrappedMiniLabel);
+                if (GUILayout.Button(m_AgentConfigured ? "更新接入配置" : "配置 Agent 接入", GUILayout.Width(120f)))
+                {
+                    ConfigureAgent();
+                    GUIUtility.ExitGUI();
+                }
+            }
+            EditorGUILayout.EndVertical();
+        }
+
         private void DrawErrorList()
         {
             EditorGUILayout.BeginVertical(GUILayout.Width(ListWidth));
             EditorGUILayout.LabelField("错误列表", EditorStyles.boldLabel);
+            if (m_SearchField == null) m_SearchField = new UnityEditor.IMGUI.Controls.SearchField();
+            string query = m_SearchField.OnGUI(m_SearchQuery);
+            if (query != m_SearchQuery)
+            {
+                SetSearchQuery(query);
+                // 筛选会改变列表控件数量，下一轮 Layout 再绘制。
+                GUIUtility.ExitGUI();
+            }
+            List<RuntimeErrorRecord> allRecords = RuntimeErrorRepository.GetRecords();
+            List<RuntimeErrorRecord> records = allRecords.FindAll(record => MatchesSearch(record, m_SearchQuery));
+            PreserveSelectedListPosition(records);
+            if (!string.IsNullOrWhiteSpace(m_SearchQuery))
+                EditorGUILayout.LabelField("匹配 " + records.Count + " / " + allRecords.Count + " 条", EditorStyles.miniLabel);
+            else
+                EditorGUILayout.LabelField("搜索消息、文件路径或函数名", EditorStyles.miniLabel);
+            if (m_SelectedRecord != null && !records.Contains(m_SelectedRecord))
+                EditorGUILayout.HelpBox("当前选中错误已被筛选隐藏，详情和同步目标保持不变。", MessageType.None);
             m_ListScroll = EditorGUILayout.BeginScrollView(m_ListScroll, false, true);
 
-            List<RuntimeErrorRecord> records = RuntimeErrorRepository.GetRecords();
             if (records.Count == 0)
             {
-                EditorGUILayout.HelpBox(RuntimeErrorCollector.IsCollecting
+                EditorGUILayout.HelpBox(allRecords.Count > 0 ? "没有匹配的错误，请修改或清除搜索条件。" : RuntimeErrorCollector.IsCollecting
                     ? "尚未收集到运行时错误。"
                     : "采集已关闭，请手动开启。", MessageType.Info);
             }
@@ -107,7 +213,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 Rect cardRect = new Rect(itemRect.x + 6f, itemRect.y, Mathf.Max(0f, itemRect.width - 12f), itemRect.height);
                 bool hovered = cardRect.Contains(Event.current.mousePosition);
                 Color backgroundColor = selected
-                    ? new Color(0.25f, 0.29f, 0.34f, 1f)
+                    ? new Color(0.16f, 0.30f, 0.43f, 1f)
                     : hovered
                         ? new Color(0.22f, 0.22f, 0.22f, 1f)
                         : new Color(0.17f, 0.17f, 0.17f, 1f);
@@ -115,8 +221,11 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                 EditorGUI.DrawRect(cardRect, backgroundColor);
                 if (selected)
                 {
-                    EditorGUI.DrawRect(new Rect(cardRect.x, cardRect.y, 3f, cardRect.height),
-                        GetKindColor(record.Error.Kind));
+                    Color selectionColor = new Color(0.40f, 0.72f, 1f, 1f);
+                    EditorGUI.DrawRect(new Rect(cardRect.x, cardRect.y, 4f, cardRect.height), selectionColor);
+                    EditorGUI.DrawRect(new Rect(cardRect.x, cardRect.y, cardRect.width, 1f), selectionColor);
+                    EditorGUI.DrawRect(new Rect(cardRect.x, cardRect.yMax - 1f, cardRect.width, 1f), selectionColor);
+                    EditorGUI.DrawRect(new Rect(cardRect.xMax - 1f, cardRect.y, 1f, cardRect.height), selectionColor);
                 }
 
                 bool clicked = GUI.Button(cardRect, GUIContent.none, GUIStyle.none);
@@ -125,7 +234,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                     cardRect.y + 5f,
                     Mathf.Max(0f, cardRect.width - ListItemHorizontalIndent * 2f),
                     cardRect.height - 10f);
-                GUI.Label(textRect, label, GetListItemStyle());
+                GUI.Label(textRect, new GUIContent(label, GetClassificationDescription(GetPrimaryLanguage(record.Error.PrimaryFrame), record.Error.LogType)), GetListItemStyle());
                 if (clicked)
                 {
                     SelectRecord(record);
@@ -133,11 +242,68 @@ namespace GameAle.EditorTools.RuntimeErrorContext
                     GUIUtility.ExitGUI();
                 }
 
-                GUILayout.Space(4f);
+                GUILayout.Space(ListItemSpacing);
             }
 
             EditorGUILayout.EndScrollView();
+            if (Event.current.type == EventType.Repaint)
+                m_ListViewportHeight = GUILayoutUtility.GetLastRect().height;
             EditorGUILayout.EndVertical();
+        }
+
+        private void PreserveSelectedListPosition(List<RuntimeErrorRecord> records)
+        {
+            if (m_SelectedRecord != null && m_PreviousVisibleRecords != null)
+            {
+                int previousIndex = m_PreviousVisibleRecords.IndexOf(m_SelectedRecord);
+                int currentIndex = records.IndexOf(m_SelectedRecord);
+                float stride = ListItemHeight + ListItemSpacing;
+                float previousTop = previousIndex * stride;
+                // 用户已滚离选中项时不抢滚动；搜索隐藏或记录淘汰也不自动选中其他记录。
+                if (previousIndex >= 0 && currentIndex >= 0 && previousIndex != currentIndex
+                    && m_ListViewportHeight > 0f
+                    && previousTop + ListItemHeight > m_ListScroll.y
+                    && previousTop < m_ListScroll.y + m_ListViewportHeight)
+                {
+                    float adjusted = m_ListScroll.y + (currentIndex - previousIndex) * stride;
+                    m_ListScroll.y = Mathf.Clamp(adjusted, 0f,
+                        Mathf.Max(0f, records.Count * stride - m_ListViewportHeight));
+                }
+            }
+            m_PreviousVisibleRecords = records;
+        }
+
+        private void SetSearchQuery(string query)
+        {
+            m_SearchQuery = query ?? string.Empty;
+            m_ListScroll = Vector2.zero;
+            m_PreviousVisibleRecords = null;
+            Repaint();
+        }
+
+        internal static bool MatchesSearch(RuntimeErrorRecord record, string query)
+        {
+            string term = (query ?? string.Empty).Trim();
+            if (term.Length == 0) return true;
+            ParsedError error = record != null ? record.Error : null;
+            if (error == null) return false;
+            if (ContainsSearch(error.Message, term) || ContainsSearch(error.RawMessage, term)
+                || ContainsSearch(error.ErrorType, term) || FrameMatchesSearch(error.PrimaryFrame, term)) return true;
+            return error.StackFrames != null && error.StackFrames.Exists(frame => FrameMatchesSearch(frame, term));
+        }
+
+        private static bool FrameMatchesSearch(ErrorStackFrame frame, string term)
+        {
+            if (frame == null) return false;
+            string pathTerm = term.Replace('\\', '/');
+            return ContainsSearch(frame.FunctionName, term)
+                || ContainsSearch((frame.RuntimeFilePath ?? string.Empty).Replace('\\', '/'), pathTerm)
+                || ContainsSearch((frame.SourceFilePath ?? string.Empty).Replace('\\', '/'), pathTerm);
+        }
+
+        private static bool ContainsSearch(string text, string term)
+        {
+            return !string.IsNullOrEmpty(text) && text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void DrawDetail()
@@ -154,11 +320,21 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
             ErrorContextInfo error = m_SelectedContext.Error;
             m_DetailScroll = EditorGUILayout.BeginScrollView(m_DetailScroll, GUI.skin.box);
-            DrawColoredDetailField("语言", GetLanguageText(error.Language), GetLanguageColor(error.Language));
-            DrawColoredDetailField("错误性质", GetKindText(error.Kind), GetKindColor(error.Kind));
-            DrawColoredDetailField("错误类型", error.ErrorType, GetKindColor(error.Kind));
-            EditorGUILayout.LabelField("次数", m_SelectedContext.Aggregation.OccurrenceCount.ToString());
-            EditorGUILayout.LabelField("位置", GetLocationText(m_SelectedContext.PrimaryLocation));
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(error.ErrorType, EditorStyles.boldLabel);
+            ErrorContextLocation primary = m_SelectedContext.PrimaryLocation;
+            ErrorLanguage locationLanguage = GetLocationLanguage(primary.Language, primary.RuntimeFilePath, primary.LineNumber);
+            GUILayout.Label(new GUIContent(GetClassificationLabel(locationLanguage, error.LogType) + "  ×"
+                + m_SelectedContext.Aggregation.OccurrenceCount,
+                GetClassificationDescription(locationLanguage, error.LogType)), EditorStyles.miniLabel);
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.LabelField("Unity 日志类型：" + error.LogType, EditorStyles.miniLabel);
+            EditorGUILayout.LabelField("错误信息", EditorStyles.boldLabel);
+            DrawReadOnlyText("RuntimeErrorContext.Message", error.Message, 44f);
+            EditorGUILayout.LabelField(new GUIContent("位置"), new GUIContent(
+                GetLocationText(m_SelectedContext.PrimaryLocation), GetLocationText(m_SelectedContext.PrimaryLocation)));
+            if (error.Language == ErrorLanguage.Mixed)
+                EditorGUILayout.LabelField("调用栈：包含 Lua 和 C#", EditorStyles.miniLabel);
             EditorGUILayout.Space();
 
             if (m_SelectedContext.SourceContexts.Count > 0)
@@ -168,12 +344,20 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             }
             else
             {
-                EditorGUILayout.HelpBox("未定位到可读取的项目源码。", MessageType.None);
+                bool luaLocation = m_SelectedContext.PrimaryLocation.Language == ErrorLanguage.Lua;
+                bool hasRoots = RuntimeErrorContextSettings.Current.LuaSourceRoots.Exists(root => !string.IsNullOrWhiteSpace(root));
+                string sourceMessage = m_SelectedContext.PrimaryLocation.IsResolved
+                    ? "已定位到源码文件，但无法读取对应行，请检查文件访问权限和行号是否超出范围。"
+                    : luaLocation && hasRoots
+                        ? "已配置 Lua 根目录，但未找到该位置的源码，请检查日志路径与根目录映射。"
+                        : "未定位到可读取的项目源码。";
+                EditorGUILayout.HelpBox(sourceMessage, MessageType.None);
+                if (luaLocation && !m_SelectedContext.PrimaryLocation.IsResolved)
+                {
+                    if (GUILayout.Button(hasRoots ? "检查 Lua 路径配置" : "配置 Lua 源码根目录"))
+                        SettingsService.OpenUserPreferences("Preferences/Runtime Error Context");
+                }
             }
-            EditorGUILayout.Space();
-
-            EditorGUILayout.LabelField("错误信息", EditorStyles.boldLabel);
-            DrawReadOnlyText("RuntimeErrorContext.Message", error.Message, 70f);
             EditorGUILayout.Space();
 
             if (!string.IsNullOrEmpty(error.LuaStackTrace))
@@ -203,7 +387,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
             if (GUILayout.Button("复制分析上下文", GUILayout.Height(26f)))
             {
-                ErrorContext currentContext = m_ContextBuilder.Build(m_SelectedRecord);
+                ErrorContext currentContext = m_ContextBuilder.Build(m_SelectedRecord, includeCallers: true);
                 GUIUtility.systemCopyBuffer = ErrorContextFormatter.ToMarkdown(currentContext);
                 ShowNotification(new GUIContent("分析上下文已复制"));
             }
@@ -226,6 +410,7 @@ namespace GameAle.EditorTools.RuntimeErrorContext
         {
             m_SelectedRecord = record;
             m_SelectedContext = m_ContextBuilder.Build(record, SourcePreviewLineCount);
+            AgentContextSync.Select(record);
             m_DetailScroll = Vector2.zero;
             EditorGUIUtility.editingTextField = false;
             m_ResetDetailFocus = true;
@@ -329,10 +514,10 @@ namespace GameAle.EditorTools.RuntimeErrorContext
 
         private static string BuildListLabel(RuntimeErrorRecord record, string location)
         {
-            string languageTag = ColorText("[" + GetLanguageText(record.Error.Language) + "]",
-                GetLanguageColor(record.Error.Language));
-            string kindTag = ColorText("[" + GetKindText(record.Error.Kind) + "]",
-                GetKindColor(record.Error.Kind));
+            ErrorLanguage primaryLanguage = GetPrimaryLanguage(record.Error.PrimaryFrame);
+            string languageTag = ColorText("[" + GetLanguageText(primaryLanguage) + "]",
+                GetLanguageColor(primaryLanguage));
+            string kindTag = ColorText("[" + GetLogTypeText(record.Error.LogType) + "]", GetLogTypeColor(record.Error.LogType));
             string content = string.Format("  x{0}\n{1}\n{2}", record.OccurrenceCount,
                 GetSummary(record.Error.Message), location);
             return languageTag + " " + kindTag + ColorText(content, new Color(0.92f, 0.92f, 0.92f, 1f));
@@ -482,52 +667,61 @@ namespace GameAle.EditorTools.RuntimeErrorContext
             }
         }
 
-        private static Color GetKindColor(ErrorKind kind)
+        private static Color GetLogTypeColor(LogType type)
         {
-            switch (kind)
+            switch (type)
             {
-                case ErrorKind.RuntimeException:
-                    return new Color(1f, 0.38f, 0.38f, 1f);
-                case ErrorKind.CaughtExceptionLog:
-                    return new Color(1f, 0.68f, 0.30f, 1f);
-                case ErrorKind.ManualErrorLog:
-                    return new Color(1f, 0.84f, 0.35f, 1f);
-                case ErrorKind.Assert:
-                    return new Color(0.95f, 0.78f, 0.28f, 1f);
-                default:
-                    return new Color(0.70f, 0.70f, 0.70f, 1f);
+                case LogType.Exception: return new Color(1f, 0.48f, 0.48f);
+                case LogType.Error: return new Color(1f, 0.74f, 0.36f);
+                case LogType.Assert: return new Color(1f, 0.84f, 0.40f);
+                default: return Color.gray;
             }
+        }
+
+        internal static ErrorLanguage GetPrimaryLanguage(ErrorStackFrame frame)
+        {
+            return frame == null ? ErrorLanguage.Unknown
+                : GetLocationLanguage(frame.Language, frame.RuntimeFilePath, frame.LineNumber);
+        }
+
+        private static ErrorLanguage GetLocationLanguage(ErrorLanguage language, string path, int line)
+        {
+            return !string.IsNullOrEmpty(path) && line > 0
+                && (language == ErrorLanguage.Lua || language == ErrorLanguage.CSharp)
+                ? language : ErrorLanguage.Unknown;
+        }
+
+        internal static string GetClassificationLabel(ErrorLanguage language, LogType type)
+        {
+            return "[" + GetLanguageText(language) + "] [" + GetLogTypeText(type) + "]";
+        }
+
+        private static string GetClassificationDescription(ErrorLanguage language, LogType type)
+        {
+            return "报错位置：" + GetLanguageText(language)
+                + "。按主错误位置判断，表示建议优先检查的代码，不保证本地源码可读取或已确认根因。"
+                + "\n按 Unity 原始日志类型显示，不推断是否主动打印或捕获异常。"
+                + "\nUnity 原始日志类型：" + type + "。分类不表示严重程度或业务是否中断。";
         }
 
         private static string GetLanguageText(ErrorLanguage language)
         {
             switch (language)
             {
-                case ErrorLanguage.CSharp:
-                    return "C#";
-                case ErrorLanguage.Lua:
-                    return "Lua";
-                case ErrorLanguage.Mixed:
-                    return "混合";
-                default:
-                    return "未知";
+                case ErrorLanguage.CSharp: return "C#";
+                case ErrorLanguage.Lua: return "Lua";
+                default: return "未定位";
             }
         }
 
-        private static string GetKindText(ErrorKind kind)
+        private static string GetLogTypeText(LogType type)
         {
-            switch (kind)
+            switch (type)
             {
-                case ErrorKind.RuntimeException:
-                    return "运行时异常";
-                case ErrorKind.CaughtExceptionLog:
-                    return "捕获异常";
-                case ErrorKind.ManualErrorLog:
-                    return "主动错误";
-                case ErrorKind.Assert:
-                    return "断言";
-                default:
-                    return "未分类";
+                case LogType.Exception: return "异常";
+                case LogType.Error: return "错误";
+                case LogType.Assert: return "断言失败";
+                default: return type.ToString();
             }
         }
     }
